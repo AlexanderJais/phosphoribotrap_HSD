@@ -154,21 +154,25 @@ cat("ok\n")
 """
 
 
-def _write_spec(
-    scratch_dir: Path,
+def _build_spec(
     contrast_pairs: list[Pair],
     salmon_root: Path,
     tx2gene: Path,
     alt_group: str,
     ref_group: str,
     cfg: AppConfig,
-) -> Path:
-    """Serialise the Rscript input spec as JSON."""
+) -> dict:
+    """Construct the Rscript input spec as a plain dict.
+
+    Kept separate from the on-disk write so we can compare the
+    in-memory fresh spec against whatever is cached in the scratch
+    directory *before* deciding whether to skip the R invocation.
+    """
     # Order: ref group first, then alt — matches records_for_contrast().
     ips = [p.ip for p in contrast_pairs]
     ins = [p.input for p in contrast_pairs]
 
-    spec = {
+    return {
         "tx2gene": str(tx2gene),
         "ip_files": [str(Path(salmon_root) / r.name() / "quant.sf") for r in ips],
         "ip_names": [r.name() for r in ips],
@@ -181,14 +185,16 @@ def _write_spec(
         "maxPAdj": cfg.anota_max_padj,
         "minSlopeTranslation": cfg.anota_min_slope_trans,
         "maxSlopeTranslation": cfg.anota_max_slope_trans,
-        "contrast": f"{alt_group}_vs_{ref_group}",
     }
-    path = scratch_dir / "spec.json"
-    path.write_text(json.dumps(spec, indent=2))
-    return path
+
+
+def _serialise_spec(spec: dict) -> str:
+    """Canonical JSON serialisation used for cache comparison."""
+    return json.dumps(spec, indent=2, sort_keys=True)
 
 
 _ANOTA2SEQ_OUTPUT_NAMES = ("translation", "buffering", "mrna_abundance")
+_SPEC_FILENAME = "spec.json"
 
 
 def _read_cached_outputs(scratch: Path) -> dict[str, pd.DataFrame]:
@@ -238,34 +244,64 @@ def run_anota2seq(
             scratch_dir=scratch,
         )
 
-    # Skip-if-cached: if all three outputs already exist and the user
-    # hasn't ticked "Force rerun" in the Config tab, short-circuit the
-    # Rscript invocation entirely. anota2seq runs take minutes, and
-    # clicking the button twice shouldn't pay that cost twice.
-    if not cfg.force_rerun and all(
-        (scratch / f"{name}.tsv").exists() for name in _ANOTA2SEQ_OUTPUT_NAMES
-    ):
+    # Build the fresh spec in memory so we can compare it against the
+    # on-disk cached spec BEFORE deciding to skip. The old behaviour
+    # was "skip if output TSVs exist" — which silently returned stale
+    # results when the user changed thresholds on the Config tab.
+    fresh_spec = _build_spec(
+        contrast_pairs, Path(salmon_root), Path(tx2gene),
+        alt_group, ref_group, cfg,
+    )
+    fresh_spec_text = _serialise_spec(fresh_spec)
+    cached_spec_path = scratch / _SPEC_FILENAME
+
+    # Skip-if-cached only when: user hasn't forced a rerun, all three
+    # output TSVs exist, the cached spec file exists, AND the cached
+    # spec matches the fresh spec byte-for-byte after canonical
+    # sorted-key serialisation. Any mismatch (threshold change, sample
+    # order change, salmon root change) invalidates the cache.
+    cached_spec_text: str | None = None
+    if cached_spec_path.exists():
+        try:
+            cached_spec_text = cached_spec_path.read_text()
+        except OSError as exc:
+            logger.warning("could not read cached spec %s: %s", cached_spec_path, exc)
+
+    cache_hit = (
+        not cfg.force_rerun
+        and cached_spec_text == fresh_spec_text
+        and all((scratch / f"{name}.tsv").exists() for name in _ANOTA2SEQ_OUTPUT_NAMES)
+    )
+    if cache_hit:
         cached = _read_cached_outputs(scratch)
-        logger.info("anota2seq cache hit for %s", contrast)
+        logger.info("anota2seq cache hit for %s (spec verified)", contrast)
         return Anota2seqResult(
             contrast=contrast,
             ok=True,
-            message=f"anota2seq cache hit for {contrast} (force_rerun to regenerate)",
+            message=f"anota2seq cache hit for {contrast} (spec verified)",
             translation=cached["translation"],
             buffering=cached["buffering"],
             mrna_abundance=cached["mrna_abundance"],
             scratch_dir=scratch,
         )
 
-    spec_path = _write_spec(
-        scratch, contrast_pairs, Path(salmon_root), Path(tx2gene),
-        alt_group, ref_group, cfg,
-    )
+    # Cache miss — write the fresh spec and run R. We also stomp over
+    # any stale output TSVs so a subsequent failure can't accidentally
+    # leave a mixed cache behind.
+    cached_spec_path.write_text(fresh_spec_text)
+    for name in _ANOTA2SEQ_OUTPUT_NAMES:
+        stale = scratch / f"{name}.tsv"
+        if stale.exists():
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+
     r_script = scratch / "run_anota2seq.R"
     r_script.write_text(RSCRIPT_TEMPLATE)
 
     rscript_bin = resolve_rscript(cfg)
-    cmd = [rscript_bin, str(r_script), str(spec_path), str(scratch)]
+    cmd = [rscript_bin, str(r_script), str(cached_spec_path), str(scratch)]
     logger.info("exec: %s", " ".join(shlex.quote(c) for c in cmd))
     start = time.time()
     try:

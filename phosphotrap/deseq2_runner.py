@@ -87,6 +87,38 @@ cat("ok\n")
 """
 
 
+_DESEQ2_OUTPUT_NAME = "interaction.tsv"
+_SPEC_FILENAME = "spec.json"
+
+
+def _build_spec(
+    contrast_pairs,
+    salmon_root: Path,
+    tx2gene: Path,
+    alt_group: str,
+    ref_group: str,
+) -> dict:
+    # Flatten 6 pairs into 12 libraries in deterministic order.
+    subset: list[SampleRecord] = []
+    for p in contrast_pairs:
+        subset.append(p.ip)
+        subset.append(p.input)
+
+    return {
+        "tx2gene": str(tx2gene),
+        "ref_group": ref_group,
+        "alt_group": alt_group,
+        "files": [str(Path(salmon_root) / r.name() / "quant.sf") for r in subset],
+        "names": [r.name() for r in subset],
+        "group": [r.group for r in subset],
+        "fraction": [r.fraction for r in subset],
+    }
+
+
+def _serialise_spec(spec: dict) -> str:
+    return json.dumps(spec, indent=2, sort_keys=True)
+
+
 def run_deseq2_interaction(
     records: list[SampleRecord],
     *,
@@ -113,44 +145,57 @@ def run_deseq2_interaction(
             scratch_dir=scratch,
         )
 
-    # Skip-if-cached — same pattern as anota2seq. Gated by cfg.force_rerun.
-    cached_table = scratch / "interaction.tsv"
-    if not cfg.force_rerun and cached_table.exists() and cached_table.stat().st_size > 0:
+    # Build the fresh spec in memory so we can verify the cache
+    # against it before skipping. The previous skip-if-cached check
+    # was "output file exists" — which silently returned stale
+    # results after the user changed samples or the salmon root.
+    fresh_spec = _build_spec(
+        contrast_pairs, Path(salmon_root), Path(tx2gene), alt_group, ref_group,
+    )
+    fresh_spec_text = _serialise_spec(fresh_spec)
+    cached_spec_path = scratch / _SPEC_FILENAME
+    cached_table = scratch / _DESEQ2_OUTPUT_NAME
+
+    cached_spec_text: str | None = None
+    if cached_spec_path.exists():
+        try:
+            cached_spec_text = cached_spec_path.read_text()
+        except OSError as exc:
+            logger.warning("could not read cached spec %s: %s", cached_spec_path, exc)
+
+    cache_hit = (
+        not cfg.force_rerun
+        and cached_spec_text == fresh_spec_text
+        and cached_table.exists()
+        and cached_table.stat().st_size > 0
+    )
+    if cache_hit:
         try:
             table = pd.read_csv(cached_table, sep="\t")
-            logger.info("DESeq2 cache hit for %s", contrast)
+            logger.info("DESeq2 cache hit for %s (spec verified)", contrast)
             return DESeq2Result(
                 contrast=contrast,
                 ok=True,
-                message=f"DESeq2 cache hit for {contrast} (force_rerun to regenerate)",
+                message=f"DESeq2 cache hit for {contrast} (spec verified)",
                 table=table,
                 scratch_dir=scratch,
             )
         except Exception as exc:
             logger.warning("DESeq2 cache read failed for %s: %s", contrast, exc)
 
-    # Flatten 6 pairs into 12 libraries in deterministic order.
-    subset: list[SampleRecord] = []
-    for p in contrast_pairs:
-        subset.append(p.ip)
-        subset.append(p.input)
+    # Cache miss — write the fresh spec, clear any stale output, run R.
+    cached_spec_path.write_text(fresh_spec_text)
+    if cached_table.exists():
+        try:
+            cached_table.unlink()
+        except OSError:
+            pass
 
-    spec = {
-        "tx2gene": str(tx2gene),
-        "ref_group": ref_group,
-        "alt_group": alt_group,
-        "files": [str(Path(salmon_root) / r.name() / "quant.sf") for r in subset],
-        "names": [r.name() for r in subset],
-        "group": [r.group for r in subset],
-        "fraction": [r.fraction for r in subset],
-    }
-    spec_path = scratch / "spec.json"
-    spec_path.write_text(json.dumps(spec, indent=2))
     r_script = scratch / "run_deseq2.R"
     r_script.write_text(RSCRIPT_TEMPLATE)
 
     rscript_bin = resolve_rscript(cfg)
-    cmd = [rscript_bin, str(r_script), str(spec_path), str(scratch)]
+    cmd = [rscript_bin, str(r_script), str(cached_spec_path), str(scratch)]
     logger.info("exec: %s", " ".join(shlex.quote(c) for c in cmd))
     start = time.time()
     try:
@@ -182,11 +227,10 @@ def run_deseq2_interaction(
             scratch_dir=scratch,
         )
 
-    tbl_path = scratch / "interaction.tsv"
     table = pd.DataFrame()
-    if tbl_path.exists() and tbl_path.stat().st_size > 0:
+    if cached_table.exists() and cached_table.stat().st_size > 0:
         try:
-            table = pd.read_csv(tbl_path, sep="\t")
+            table = pd.read_csv(cached_table, sep="\t")
         except Exception:
             table = pd.DataFrame()
 
