@@ -202,14 +202,37 @@ with tabs[0]:
         )
     with col_b:
         st.subheader("Runtime")
-        cfg.threads      = int(st.number_input("Threads", min_value=1, max_value=128, value=int(cfg.threads)))
-        cfg.run_fastp    = st.checkbox("Run fastp trimming",    value=cfg.run_fastp)
-        cfg.force_rerun  = st.checkbox("Force rerun (ignore cache)", value=cfg.force_rerun)
-        cfg.salmon_libtype = st.selectbox(
+        # Runtime widgets use the same explicit-key + session-state
+        # pattern as the path fields above (fixed in d3b838f) and the
+        # anota2seq threshold widgets below. Previously they used the
+        # ``cfg.X = st.widget(..., value=cfg.X)`` antipattern, which
+        # means a programmatic update from another tab — e.g. a future
+        # "retry failed samples" button flipping ``cfg.force_rerun`` —
+        # would silently get overwritten by the stale widget value on
+        # the next Config-tab render. See the v5029e4d / d3b838f
+        # post-mortem on the path fields.
+        _LIBTYPE_OPTIONS = ["A", "IU", "ISR", "ISF", "MU", "OU"]
+        st.session_state.setdefault("widget_threads", int(cfg.threads))
+        st.session_state.setdefault("widget_run_fastp", bool(cfg.run_fastp))
+        st.session_state.setdefault("widget_force_rerun", bool(cfg.force_rerun))
+        st.session_state.setdefault(
+            "widget_salmon_libtype",
+            cfg.salmon_libtype if cfg.salmon_libtype in _LIBTYPE_OPTIONS else "A",
+        )
+
+        st.number_input(
+            "Threads",
+            min_value=1,
+            max_value=128,
+            step=1,
+            key="widget_threads",
+        )
+        st.checkbox("Run fastp trimming", key="widget_run_fastp")
+        st.checkbox("Force rerun (ignore cache)", key="widget_force_rerun")
+        st.selectbox(
             "Salmon libType",
-            options=["A", "IU", "ISR", "ISF", "MU", "OU"],
-            index=["A", "IU", "ISR", "ISF", "MU", "OU"].index(cfg.salmon_libtype)
-            if cfg.salmon_libtype in ["A", "IU", "ISR", "ISF", "MU", "OU"] else 0,
+            options=_LIBTYPE_OPTIONS,
+            key="widget_salmon_libtype",
         )
 
     st.divider()
@@ -299,6 +322,10 @@ with tabs[0]:
     # Copy widget state back into cfg so save/diff see the live values.
     for _wkey, _attr in _PATH_KEYS.items():
         setattr(cfg, _attr, st.session_state[_wkey])
+    cfg.threads               = int(st.session_state["widget_threads"])
+    cfg.run_fastp             = bool(st.session_state["widget_run_fastp"])
+    cfg.force_rerun           = bool(st.session_state["widget_force_rerun"])
+    cfg.salmon_libtype        = str(st.session_state["widget_salmon_libtype"])
     cfg.anota_delta_pt        = float(st.session_state["widget_anota_delta_pt"])
     cfg.anota_delta_tp        = float(st.session_state["widget_anota_delta_tp"])
     cfg.anota_max_padj        = float(st.session_state["widget_anota_max_padj"])
