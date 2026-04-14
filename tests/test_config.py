@@ -5,7 +5,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from phosphotrap.config import DEFAULT_CONTRASTS, AppConfig
+from phosphotrap.config import (
+    DEFAULT_CONTRASTS,
+    AppConfig,
+    contrasts_for_reference,
+    reconcile_contrasts,
+)
 
 
 def test_load_bad_types_falls_through_to_defaults(tmp_path: Path):
@@ -52,3 +57,36 @@ def test_diff_reports_only_changed_fields():
     b.threads = 99
     d = a.diff(b)
     assert "threads" in d and d["threads"] == (a.threads, 99)
+
+
+# ----------------------------------------------------------------------
+# reconcile_contrasts: guards the multiselect against stale session state
+# after a reference-group change. Without this reconciliation Streamlit
+# either crashes or silently drops selections when ``options`` changes.
+# ----------------------------------------------------------------------
+def test_reconcile_contrasts_preserves_valid_selection():
+    current = ["HSD1_vs_NCD", "HSD3_vs_NCD"]
+    available = ["HSD1_vs_NCD", "HSD3_vs_NCD", "HSD3_vs_HSD1"]
+    assert reconcile_contrasts(current, available) == current
+
+
+def test_reconcile_contrasts_filters_stale_entries():
+    # User switched reference group from NCD to HSD1. Old state
+    # ``HSD1_vs_NCD`` is no longer valid, but ``HSD3_vs_NCD`` still is.
+    current = ["HSD1_vs_NCD", "HSD3_vs_NCD"]
+    available = contrasts_for_reference("HSD1", ("NCD", "HSD1", "HSD3"))
+    # available is ["NCD_vs_HSD1", "HSD3_vs_HSD1", "HSD3_vs_NCD"]
+    reconciled = reconcile_contrasts(current, available)
+    assert reconciled == ["HSD3_vs_NCD"]
+
+
+def test_reconcile_contrasts_returns_empty_when_nothing_survives():
+    current = ["HSD1_vs_NCD", "HSD3_vs_NCD"]
+    # Simulate a total-mismatch reference group (e.g., user picked a
+    # reference group that doesn't appear in any of the old contrasts)
+    available = ["ALT_vs_REF"]
+    assert reconcile_contrasts(current, available) == []
+
+
+def test_reconcile_contrasts_empty_current_is_noop():
+    assert reconcile_contrasts([], ["HSD1_vs_NCD", "HSD3_vs_NCD"]) == []

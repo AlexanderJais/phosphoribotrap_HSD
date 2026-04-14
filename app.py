@@ -26,6 +26,7 @@ from phosphotrap.config import (
     DEFAULT_CONFIG_PATH,
     AppConfig,
     contrasts_for_reference,
+    reconcile_contrasts,
 )
 from phosphotrap.deseq2_runner import run_deseq2_interaction
 from phosphotrap.fpkm import (
@@ -139,9 +140,11 @@ with tabs[0]:
     st.divider()
     st.subheader("Design")
 
-    # Reference group drives the contrasts list. Changing it resets the
-    # available contrast options; downstream tabs read ``cfg.contrasts``
-    # for whatever the user currently has selected.
+    # Reference group drives the contrasts list. Changing it invalidates
+    # any selections held in the multiselect's session state, so we
+    # reconcile before rendering — otherwise Streamlit will either crash
+    # (older versions) or silently drop the stale values (newer
+    # versions). Either way the user would see the wrong thing.
     d1, d2 = st.columns(2)
     with d1:
         cfg.reference_group = st.selectbox(
@@ -152,10 +155,25 @@ with tabs[0]:
             help="Contrast strings on downstream tabs are derived from this.",
         )
         available = contrasts_for_reference(cfg.reference_group, GROUPS)
+
+        _contrasts_key = "contrasts_multiselect"
+        if _contrasts_key in st.session_state:
+            # Filter any stale session-state values against the current
+            # options. If nothing survives, drop the key entirely so
+            # ``default=`` below re-initialises the widget.
+            reconciled = reconcile_contrasts(
+                st.session_state[_contrasts_key], available
+            )
+            if reconciled:
+                st.session_state[_contrasts_key] = reconciled
+            else:
+                del st.session_state[_contrasts_key]
+
         cfg.contrasts = st.multiselect(
             "Contrasts",
             options=available,
-            default=[c for c in cfg.contrasts if c in available] or available[:2],
+            default=reconcile_contrasts(cfg.contrasts, available) or available[:2],
+            key=_contrasts_key,
         )
     with d2:
         st.caption(

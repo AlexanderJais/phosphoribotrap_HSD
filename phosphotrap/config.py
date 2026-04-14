@@ -37,6 +37,18 @@ def contrasts_for_reference(ref_group: str, all_groups: tuple[str, ...]) -> list
         contrasts.append(f"{others[1]}_vs_{others[0]}")
     return contrasts
 
+
+def reconcile_contrasts(current: list[str], available: list[str]) -> list[str]:
+    """Filter ``current`` down to entries still present in ``available``.
+
+    Used to reconcile stale widget session state after the user changes
+    the reference group. Preserves the user's original ordering for
+    whatever values survive; returns an empty list if nothing does.
+    """
+    if not current:
+        return []
+    return [c for c in current if c in available]
+
 # anota2seq thresholds for a chronic stimulus — deliberately loose.
 DEFAULT_DELTA_PT = 0.1
 DEFAULT_DELTA_TP = 0.1
