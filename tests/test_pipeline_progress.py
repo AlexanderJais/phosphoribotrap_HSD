@@ -103,6 +103,22 @@ def _one_record() -> SampleRecord:
     )
 
 
+def _make_index_and_tx2gene(tmp_path: Path) -> tuple[Path, Path]:
+    """Create a fake salmon index dir + tx2gene file that pass the
+    defense-in-depth checks at the top of run_salmon (LOW #15).
+
+    ``tmp_path`` may not exist yet — the helper creates it with
+    ``parents=True`` so test cases can pass nested subdirs.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    idx = tmp_path / "idx"
+    idx.mkdir()
+    (idx / "info.json").write_text("{}")
+    tx = tmp_path / "tx2g.tsv"
+    tx.write_text("ENSMUST1\tENSMUSG1\tGene1\n")
+    return idx, tx
+
+
 def test_run_salmon_flags_missing_quant_genes_sf(tmp_path: Path):
     """HIGH #3 post-fix: quant.genes.sf must exist for ok=True.
 
@@ -114,6 +130,7 @@ def test_run_salmon_flags_missing_quant_genes_sf(tmp_path: Path):
     rec = _one_record()
     output_dir = tmp_path / "out"
     report_dir = tmp_path / "rep"
+    idx, tx = _make_index_and_tx2gene(tmp_path)
 
     # Fake _run_tee: write quant.sf but NOT quant.genes.sf, return rc=0.
     def fake_run_tee(cmd, log_file, progress_cb=None, total_expected=1.0):
@@ -128,8 +145,8 @@ def test_run_salmon_flags_missing_quant_genes_sf(tmp_path: Path):
     with patch.object(pipeline_mod, "_run_tee", side_effect=fake_run_tee):
         res = run_salmon(
             rec,
-            salmon_index=tmp_path / "idx",
-            tx2gene=tmp_path / "tx2g.tsv",
+            salmon_index=idx,
+            tx2gene=tx,
             output_dir=output_dir,
             threads=2,
             libtype="A",
@@ -151,6 +168,7 @@ def test_run_salmon_happy_path(tmp_path: Path):
     rec = _one_record()
     output_dir = tmp_path / "out"
     report_dir = tmp_path / "rep"
+    idx, tx = _make_index_and_tx2gene(tmp_path)
 
     def fake_run_tee(cmd, log_file, progress_cb=None, total_expected=1.0):
         quant_dir = output_dir / "salmon" / rec.name()
@@ -164,8 +182,8 @@ def test_run_salmon_happy_path(tmp_path: Path):
     with patch.object(pipeline_mod, "_run_tee", side_effect=fake_run_tee):
         res = run_salmon(
             rec,
-            salmon_index=tmp_path / "idx",
-            tx2gene=tmp_path / "tx2g.tsv",
+            salmon_index=idx,
+            tx2gene=tx,
             output_dir=output_dir,
             threads=2,
             libtype="A",
@@ -187,6 +205,7 @@ def test_run_salmon_cache_hit_requires_both_files(tmp_path: Path):
     rec = _one_record()
     output_dir = tmp_path / "out"
     report_dir = tmp_path / "rep"
+    idx, tx = _make_index_and_tx2gene(tmp_path)
     quant_dir = output_dir / "salmon" / rec.name()
     quant_dir.mkdir(parents=True, exist_ok=True)
     # Only quant.sf pre-exists, no quant.genes.sf.
@@ -207,8 +226,8 @@ def test_run_salmon_cache_hit_requires_both_files(tmp_path: Path):
     with patch.object(pipeline_mod, "_run_tee", side_effect=fake_run_tee):
         res = run_salmon(
             rec,
-            salmon_index=tmp_path / "idx",
-            tx2gene=tmp_path / "tx2g.tsv",
+            salmon_index=idx,
+            tx2gene=tx,
             output_dir=output_dir,
             threads=2,
             libtype="A",
@@ -221,6 +240,77 @@ def test_run_salmon_cache_hit_requires_both_files(tmp_path: Path):
     assert called["n"] == 1, "cache check must not short-circuit without quant.genes.sf"
     assert res.ok is False
     assert "quant.genes.sf" in res.message
+
+
+def test_run_salmon_rejects_non_directory_index(tmp_path: Path):
+    """LOW #15 defense in depth: bad salmon_index must short-circuit.
+
+    Caller is expected to pass a directory containing info.json. If
+    they pass a file, a non-existent path, or an empty directory,
+    run_salmon should fail fast with a clear message — not 30 seconds
+    later after salmon itself complains.
+    """
+    rec = _one_record()
+    output_dir = tmp_path / "out"
+    report_dir = tmp_path / "rep"
+
+    # Case 1: salmon_index is a file, not a directory.
+    bad_idx_file = tmp_path / "bad_idx_as_file"
+    bad_idx_file.write_text("not a directory")
+    tx = tmp_path / "tx2g.tsv"
+    tx.write_text("ENSMUST1\tENSMUSG1\tGene1\n")
+
+    res = run_salmon(
+        rec,
+        salmon_index=bad_idx_file,
+        tx2gene=tx,
+        output_dir=output_dir,
+        threads=2,
+        libtype="A",
+        force=False,
+        log_file=tmp_path / "log.log",
+        use_trimmed=False,
+        report_dir=report_dir,
+    )
+    assert res.ok is False
+    assert "directory" in res.message.lower()
+
+    # Case 2: salmon_index is a directory but has no info.json.
+    bad_idx_dir = tmp_path / "bad_idx_dir"
+    bad_idx_dir.mkdir()
+    res = run_salmon(
+        rec,
+        salmon_index=bad_idx_dir,
+        tx2gene=tx,
+        output_dir=output_dir,
+        threads=2,
+        libtype="A",
+        force=False,
+        log_file=tmp_path / "log.log",
+        use_trimmed=False,
+        report_dir=report_dir,
+    )
+    assert res.ok is False
+    assert "info.json" in res.message
+
+    # Case 3: tx2gene is a directory.
+    good_idx, _ = _make_index_and_tx2gene(tmp_path / "good")
+    bad_tx = tmp_path / "tx2g_dir"
+    bad_tx.mkdir()
+    res = run_salmon(
+        rec,
+        salmon_index=good_idx,
+        tx2gene=bad_tx,
+        output_dir=output_dir,
+        threads=2,
+        libtype="A",
+        force=False,
+        log_file=tmp_path / "log.log",
+        use_trimmed=False,
+        report_dir=report_dir,
+    )
+    assert res.ok is False
+    assert "tx2gene" in res.message.lower()
 
 
 def test_run_tee_watchdog_kills_hung_subprocess(tmp_path: Path):

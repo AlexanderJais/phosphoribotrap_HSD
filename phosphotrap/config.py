@@ -342,7 +342,10 @@ def _coerce(value: Any, target: Any) -> Any:
         return _coerce_from_str(value, target)
 
     origin = get_origin(target)
-    if origin in (list, tuple):
+    # AppConfig only declares ``list[str]`` (the ``contrasts`` field),
+    # so the list branch is the only one we exercise. The earlier
+    # tuple-handling code was dead — kept the list branch tightened.
+    if origin is list:
         if not isinstance(value, (list, tuple)):
             return _INVALID
         args = get_args(target)
@@ -354,7 +357,7 @@ def _coerce(value: Any, target: Any) -> Any:
                 if c is _INVALID:
                     return _INVALID
                 out.append(c)
-            return out if origin is list else tuple(out)
+            return out
         return list(value)
 
     if target is int:

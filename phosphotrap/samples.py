@@ -111,7 +111,7 @@ def to_records(df: pd.DataFrame) -> list[SampleRecord]:
     for idx, row in df.iterrows():
         ccg = _clean_cell(row.get("ccg_id"))
         group = _clean_cell(row.get("group"))
-        frac = _clean_cell(row.get("fraction")).upper() or "IP"
+        frac = _clean_cell(row.get("fraction")).upper()
         rep_raw = row.get("replicate")
         if not ccg or not group:
             continue
@@ -122,7 +122,27 @@ def to_records(df: pd.DataFrame) -> list[SampleRecord]:
         except (TypeError, ValueError):
             continue
 
-        fraction = frac if frac in FRACTIONS else "IP"
+        # LOW #16: previously defaulted blank/unknown ``fraction`` to
+        # ``"IP"`` silently. That was friendly for blank rows from
+        # ``st.data_editor`` but DANGEROUS for typo'd values: a
+        # mis-classified row would join the IP pool and silently
+        # overwrite the legitimate IP for that (group, replicate) in
+        # ``pairs()``'s by_key dict. Drop with a warning instead so
+        # the user sees the issue in the Logs tab.
+        if not frac:
+            logger.warning(
+                "sample row %s dropped: blank fraction "
+                "(must be 'IP' or 'INPUT')",
+                idx,
+            )
+            continue
+        if frac not in FRACTIONS:
+            logger.warning(
+                "sample row %s dropped: fraction %r is not 'IP' or 'INPUT'",
+                idx, frac,
+            )
+            continue
+        fraction = frac
 
         if not is_safe_token(ccg):
             logger.warning(

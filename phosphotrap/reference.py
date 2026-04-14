@@ -68,6 +68,12 @@ ProgressCB = Callable[[float, str], None]
 # the server stalled.
 _DOWNLOAD_IDLE_TIMEOUT_S = 120
 
+# Progress-bar ramp denominator for ``salmon index``. Same arbitrary
+# line-count fake as the pipeline runner uses for fastp / salmon quant
+# — salmon index emits hundreds of progress lines but no parseable
+# total. Centralised so it isn't a magic number at the call site.
+_SALMON_INDEX_PROGRESS_LINES = 800
+
 
 # ----------------------------------------------------------------------
 # Release metadata
@@ -454,7 +460,7 @@ def build_salmon_index(
 
     # ``salmon index`` emits hundreds of progress lines; use a fake
     # line-count ramp like pipeline._run_tee does for salmon quant.
-    expected_lines = 800
+    expected_lines = _SALMON_INDEX_PROGRESS_LINES
     n_lines = 0
     last_emit = 0.0
     with log_file.open("a", encoding="utf-8") as lf:
@@ -579,7 +585,7 @@ def build_reference(
     download_file(
         files.genome_url, genome_fa, force=False,
         progress_cb=_stage("download_genome"),
-        label=f"genome (GRCm39)",
+        label="genome (GRCm39)",
     )
     completed += _STAGE_WEIGHTS["download_genome"]
 

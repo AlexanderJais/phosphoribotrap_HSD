@@ -39,6 +39,15 @@ logger = get_logger()
 # killing the streamlit process from a terminal.
 _SUBPROCESS_TIMEOUT_S = 2 * 60 * 60
 
+# Progress-bar ramp denominators for the line-count fake. These are
+# arbitrary numbers tuned so the bar fills smoothly through a typical
+# fastp / salmon run on this design — not actual line counts. Salmon
+# in particular has no parseable progress output, so any choice here
+# is a guess. Centralised so they're not buried as magic numbers in
+# call sites.
+_FASTP_PROGRESS_LINES = 200
+_SALMON_QUANT_PROGRESS_LINES = 400
+
 
 @dataclass
 class StepResult:
@@ -256,7 +265,10 @@ def run_fastp(
         "--thread", str(threads),
     ]
     try:
-        rc, tail = _run_tee(cmd, log_file, progress_cb, total_expected=200)
+        rc, tail = _run_tee(
+            cmd, log_file, progress_cb,
+            total_expected=_FASTP_PROGRESS_LINES,
+        )
     except FileNotFoundError:
         return StepResult(
             "fastp", rec.name(), False, time.time() - start,
@@ -288,6 +300,30 @@ def run_salmon(
     quant_sf = quant_dir / "quant.sf"
     quant_genes_sf = quant_dir / "quant.genes.sf"
 
+    # Defense in depth: the Streamlit Pipeline tab already gates on
+    # ``validate_reference_paths`` before letting the user click Start,
+    # but ``run_salmon`` is also callable from tests and from any
+    # future CLI wrapper. Reject obviously-bad ``salmon_index`` and
+    # ``tx2gene`` here too so a caller that bypasses the UI gets a
+    # clear error instead of a cryptic salmon failure 30 seconds in.
+    if not Path(salmon_index).is_dir():
+        return StepResult(
+            "salmon", rec.name(), False, time.time() - start,
+            f"salmon_index must be a directory containing info.json, "
+            f"got: {salmon_index}",
+        )
+    if not (Path(salmon_index) / "info.json").exists():
+        return StepResult(
+            "salmon", rec.name(), False, time.time() - start,
+            f"salmon_index directory has no info.json — not a built "
+            f"index: {salmon_index}",
+        )
+    if not Path(tx2gene).is_file():
+        return StepResult(
+            "salmon", rec.name(), False, time.time() - start,
+            f"tx2gene must be an existing file (tx2gene.tsv), got: {tx2gene}",
+        )
+
     if not force and quant_sf.exists() and quant_genes_sf.exists():
         msg = f"salmon cache hit for {rec.name()}"
         logger.info(msg)
@@ -316,7 +352,10 @@ def run_salmon(
         "-o", str(quant_dir),
     ]
     try:
-        rc, tail = _run_tee(cmd, log_file, progress_cb, total_expected=400)
+        rc, tail = _run_tee(
+            cmd, log_file, progress_cb,
+            total_expected=_SALMON_QUANT_PROGRESS_LINES,
+        )
     except FileNotFoundError:
         return StepResult(
             "salmon", rec.name(), False, time.time() - start,

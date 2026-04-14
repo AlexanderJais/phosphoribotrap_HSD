@@ -587,7 +587,8 @@ catches this footgun.
 This bug used to be silent because the v5029e4d Reference tab didn't
 use explicit Streamlit widget keys, so a stale text_input value in
 the Config tab could overwrite the correct one on the next render.
-Fixed in v5e65fxx (and tested in `tests/test_config_validation.py`).
+Fixed in commit `d3b838f` (and tested in
+`tests/test_config_validation.py`).
 
 ### `ERROR: pwrite failed: No space left on device` during fastp
 
