@@ -94,6 +94,54 @@ def contrasts_for_reference(ref_group: str, all_groups: tuple[str, ...]) -> list
     return contrasts
 
 
+def validate_fastq_dir(fastq_dir: str) -> list[str]:
+    """Return a list of human-readable errors for the fastq directory.
+
+    Catches the HIGH #4 footgun where the Samples tab's "Auto-populate
+    fastq paths" button silently returned "0 / 18 ready samples" when
+    ``cfg.fastq_dir`` was a typo or pointed at a non-existent path.
+    Before this helper, the only check was ``if not cfg.fastq_dir:``
+    (emptiness), so a bad path was indistinguishable from "no files
+    match the vendor regex" in the UI.
+
+    An empty list means "looks OK". Empty ``fastq_dir`` is treated as
+    "unconfigured" rather than "error" because the user may genuinely
+    not have set it yet on a fresh install — callers that need
+    non-empty should gate on that separately.
+    """
+    errs: list[str] = []
+
+    if not fastq_dir:
+        # Empty is "unconfigured", not "invalid" — callers decide whether
+        # to hard-error or just nudge the user.
+        return errs
+
+    p = Path(fastq_dir).expanduser()
+    if not p.exists():
+        errs.append(f"Fastq directory does not exist: {p}")
+        return errs
+    if not p.is_dir():
+        errs.append(f"Fastq directory path is a file, not a directory: {p}")
+        return errs
+
+    # Directory exists. Sanity-check that it contains *something*
+    # matching the .fastq.gz convention. An empty directory is almost
+    # always a user mistake — either the wrong path, or the files
+    # haven't been copied over yet.
+    try:
+        has_any = any(p.glob("*.fastq.gz"))
+    except OSError as exc:  # pragma: no cover - defensive
+        errs.append(f"Could not list fastq directory {p}: {exc}")
+        return errs
+    if not has_any:
+        errs.append(
+            f"Fastq directory {p} contains no *.fastq.gz files. "
+            f"Double-check the path, or copy the raw reads into this "
+            f"directory before running the pipeline."
+        )
+    return errs
+
+
 def validate_reference_paths(
     salmon_index: str, tx2gene_tsv: str
 ) -> list[str]:

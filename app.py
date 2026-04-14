@@ -28,6 +28,7 @@ from phosphotrap.config import (
     contrasts_for_reference,
     reconcile_contrasts,
     resolve_rscript,
+    validate_fastq_dir,
     validate_reference_paths,
 )
 from phosphotrap.deseq2_runner import run_deseq2_interaction
@@ -351,44 +352,22 @@ with tabs[0]:
     cfg.anota_max_slope_trans = float(st.session_state["widget_anota_max_slope_trans"])
     cfg.min_fpkm              = float(st.session_state["widget_min_fpkm"])
 
-    # Inline validation of the two paths that salmon quant and
-    # tximport actually touch. Catches the "tx2gene_tsv points at a
-    # directory" footgun before the pipeline button is ever clicked,
-    # and points the user back at the Reference tab.
+    # Inline validation of the paths that downstream steps actually
+    # touch. Catches:
+    #   - the "tx2gene_tsv points at a directory" footgun before the
+    #     pipeline button is ever clicked (d3b838f, MEDIUM #5)
+    #   - fastq_dir that doesn't exist or has no *.fastq.gz files
+    #     (HIGH #4 — previously only an emptiness check)
+    # Surfaces both through a single error panel so the user sees
+    # every issue at once, not one-at-a-time across reruns. Uses the
+    # ``validate_reference_paths`` and ``validate_fastq_dir`` helpers
+    # so there's a single source of truth shared with the Pipeline,
+    # Analysis, and Samples tabs.
     _path_errs: list[str] = []
-    if cfg.salmon_index:
-        _p = Path(cfg.salmon_index).expanduser()
-        if not _p.exists():
-            _path_errs.append(
-                f"Salmon index path does not exist: `{_p}`"
-            )
-        elif not _p.is_dir():
-            _path_errs.append(
-                f"Salmon index must be a **directory** (the folder "
-                f"containing `info.json`, `pos.bin`, `seq.bin`, …), "
-                f"not a file: `{_p}`"
-            )
-        elif not (_p / "info.json").exists():
-            _path_errs.append(
-                f"Salmon index directory `{_p}` has no `info.json`. "
-                f"This doesn't look like a built salmon index — "
-                f"rebuild it via the Reference tab."
-            )
-    if cfg.tx2gene_tsv:
-        _t = Path(cfg.tx2gene_tsv).expanduser()
-        if not _t.exists():
-            _path_errs.append(
-                f"tx2gene TSV path does not exist: `{_t}`"
-            )
-        elif _t.is_dir():
-            _path_errs.append(
-                f"tx2gene TSV must be a **file** (`tx2gene.tsv`), "
-                f"not a directory: `{_t}`. If you built the reference "
-                f"via the Reference tab, the correct file lives inside "
-                f"that directory — click **Use these paths in Config** "
-                f"on the Reference tab to auto-populate, or append "
-                f"`/tx2gene.tsv` to this path by hand."
-            )
+    _path_errs.extend(
+        validate_reference_paths(cfg.salmon_index, cfg.tx2gene_tsv)
+    )
+    _path_errs.extend(validate_fastq_dir(cfg.fastq_dir))
     if _path_errs:
         st.error(
             "Path validation:\n\n- " + "\n- ".join(_path_errs)
@@ -708,15 +687,30 @@ with tabs[2]:
             st.rerun()
     with c2:
         if st.button("Auto-populate fastq paths", type="primary"):
+            # HIGH #4: "Set a fastq directory in Config first" only
+            # fired on an empty string. A typo like
+            # /Users/me/Desktop/Raw_Data (missing trailing segment)
+            # would silently return "0 / 18 ready samples" with no
+            # explanation. validate_fastq_dir now enforces existence,
+            # directory-ness, and "at least one *.fastq.gz file inside"
+            # — so the user sees a precise error panel instead of
+            # guessing why the summary is empty.
             if not cfg.fastq_dir:
                 st.error("Set a fastq directory in Config first.")
             else:
-                # This button mutates sample_df and reruns; the cached
-                # sample_records/ready_samples above will be
-                # recomputed from the fresh df on the next rerun.
-                populate_fastq_paths(sample_records, Path(cfg.fastq_dir))
-                st.session_state.sample_df = records_to_df(sample_records)
-                st.rerun()
+                _fq_errs = validate_fastq_dir(cfg.fastq_dir)
+                if _fq_errs:
+                    st.error(
+                        "Cannot auto-populate fastq paths:\n\n- "
+                        + "\n- ".join(_fq_errs)
+                    )
+                else:
+                    # This button mutates sample_df and reruns; the cached
+                    # sample_records/ready_samples above will be
+                    # recomputed from the fresh df on the next rerun.
+                    populate_fastq_paths(sample_records, Path(cfg.fastq_dir))
+                    st.session_state.sample_df = records_to_df(sample_records)
+                    st.rerun()
     with c3:
         st.download_button(
             "Download sheet (TSV)",
