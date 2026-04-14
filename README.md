@@ -70,7 +70,19 @@ build, sample sheet, pipeline, and analysis live inside the app.
    (default `HSD1_vs_NCD`). Click **Load salmon quant outputs**,
    then **Run anota2seq**, then **Compute IP/Input ratios**. Tables,
    volcano plot, and TSV downloads appear inline. Repeat for the
-   `HSD3_vs_NCD` contrast.
+   `HSD3_vs_NCD` contrast so both are loaded into session state.
+
+8. **Figures tab — Nature-grade galanin signaling panels.** Galanin
+   core (Gal, Galp, Galr1, Galr2, Galr3) is highlighted automatically.
+   Paste additional gene symbols into the **Additional highlight
+   genes** text area if you want to overlay a second set (comma,
+   whitespace, or newline separated — case-insensitive). Adjust font
+   size, padj threshold, and heatmap normalization via the sliders
+   above the panels. Five panels render: volcano (A), per-gene strip
+   plot (B), expression heatmap (C), anota2seq regulatory mode table
+   (D), cross-contrast consistency scatter (E). Each has HTML / SVG /
+   PNG download buttons. SVG/PNG need `kaleido`, which is in
+   `environment.yml` — HTML always works even without it.
 
 If anything goes wrong, the **Logs** tab tails `phosphotrap.log` with
 a substring filter, and the Pipeline tab writes per-sample
@@ -257,7 +269,7 @@ substitute for that at n = 3 per group.
 ## Repository layout
 
 ```
-app.py                      # Streamlit entry point (6 tabs)
+app.py                      # Streamlit entry point (7 tabs)
 phosphotrap/
   __init__.py
   logger.py                 # rotating-file logger, idempotent for Streamlit reruns
@@ -265,6 +277,7 @@ phosphotrap/
   samples.py                # default 18-row sheet, fastq discovery, pair resolver
   pipeline.py               # fastp + salmon runners, progress callbacks
   reference.py              # GENCODE downloader + salmon index + tx2gene builder
+  figures.py                # Nature-grade plot helpers (Figures tab backend)
   fpkm.py                   # FPKM, sign-consistency, Mann-Whitney
   anota2seq_runner.py       # primary analysis — Rscript shell-out
   deseq2_runner.py          # optional DESeq2 interaction cross-check
@@ -273,7 +286,7 @@ requirements.txt            # pip side (Python only)
 environment.yml             # conda bootstrap (includes bioconda tools)
 ```
 
-## Streamlit app — the six tabs
+## Streamlit app — the seven tabs
 
 1. **Config** — paths, runtime options, reference group, contrasts, the
    chronic-stimulus preset toggle, anota2seq thresholds, auto-save on
@@ -303,7 +316,38 @@ environment.yml             # conda bootstrap (includes bioconda tools)
    buttons. Histogram, top-30 bar chart, volcano plot, and separate
    anota2seq translation/buffering/mRNA-abundance tables. Downloads
    everywhere.
-6. **Logs** — live tail of `logs/phosphotrap.log` with substring
+6. **Figures** — Nature-grade publication panels focused on galanin
+   signaling (Gal, Galp, Galr1, Galr2, Galr3), with a text area to
+   add custom highlight genes (case-insensitive, comma/newline
+   separated). Five panels per render, each downloadable as HTML /
+   SVG / PNG:
+
+   - **A — Volcano plot** per contrast with galanin highlighted
+     crimson, custom highlights blue, labeled, and a dashed padj
+     threshold line.
+   - **B — Per-gene log₂(IP/Input) strip plot** — every animal as
+     an individual dot grouped by diet, with group-mean bars
+     overlaid. This is the "effect is there at the animal level"
+     panel reviewers ask for on small-n designs.
+   - **C — Expression heatmap** of the highlighted genes across all
+     18 samples, grouped `(group × fraction)` with visual block
+     gaps and hierarchical column headers. Switchable between
+     z-score (diverging RdBu), log₂(FPKM+1), and raw FPKM.
+   - **D — anota2seq regulatory mode table** per gene × per
+     contrast, with translation hits sorted to the top.
+   - **E — Cross-contrast consistency scatter** — log₂ FC from
+     HSD1_vs_NCD on x, HSD3_vs_NCD on y, galanin highlighted, axes
+     locked to a square aspect ratio with a diagonal y=x reference.
+     Points near the diagonal are reproducibly regulated across
+     both HSD durations — the single most persuasive piece of
+     evidence for a chronic stimulus at this sample size.
+
+   Backed by `phosphotrap/figures.py`, which is pure data-in /
+   plotly-figure-out with no Streamlit imports — every plot is
+   independently testable and the same functions can be reused
+   from a CLI export job. Vector downloads (SVG / PNG) go through
+   `kaleido`; HTML downloads always work even without it.
+7. **Logs** — live tail of `logs/phosphotrap.log` with substring
    filter. Stitches rolled-over backups so a long run straddling a
    rotation boundary doesn't drop recent lines. The filter-clear
    button stages a reset and reruns the script *before* the widget is
