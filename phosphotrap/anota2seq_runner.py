@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .config import AppConfig
+from .config import AppConfig, resolve_rscript
 from .logger import get_logger
 from .samples import Pair, SampleRecord, records_for_contrast
 
@@ -188,6 +188,24 @@ def _write_spec(
     return path
 
 
+_ANOTA2SEQ_OUTPUT_NAMES = ("translation", "buffering", "mrna_abundance")
+
+
+def _read_cached_outputs(scratch: Path) -> dict[str, pd.DataFrame]:
+    """Read the three TSV outputs from a scratch dir, if present."""
+    out: dict[str, pd.DataFrame] = {}
+    for name in _ANOTA2SEQ_OUTPUT_NAMES:
+        p = scratch / f"{name}.tsv"
+        if not p.exists() or p.stat().st_size == 0:
+            out[name] = pd.DataFrame()
+            continue
+        try:
+            out[name] = pd.read_csv(p, sep="\t")
+        except Exception:
+            out[name] = pd.DataFrame()
+    return out
+
+
 def run_anota2seq(
     records: list[SampleRecord],
     *,
@@ -220,6 +238,25 @@ def run_anota2seq(
             scratch_dir=scratch,
         )
 
+    # Skip-if-cached: if all three outputs already exist and the user
+    # hasn't ticked "Force rerun" in the Config tab, short-circuit the
+    # Rscript invocation entirely. anota2seq runs take minutes, and
+    # clicking the button twice shouldn't pay that cost twice.
+    if not cfg.force_rerun and all(
+        (scratch / f"{name}.tsv").exists() for name in _ANOTA2SEQ_OUTPUT_NAMES
+    ):
+        cached = _read_cached_outputs(scratch)
+        logger.info("anota2seq cache hit for %s", contrast)
+        return Anota2seqResult(
+            contrast=contrast,
+            ok=True,
+            message=f"anota2seq cache hit for {contrast} (force_rerun to regenerate)",
+            translation=cached["translation"],
+            buffering=cached["buffering"],
+            mrna_abundance=cached["mrna_abundance"],
+            scratch_dir=scratch,
+        )
+
     spec_path = _write_spec(
         scratch, contrast_pairs, Path(salmon_root), Path(tx2gene),
         alt_group, ref_group, cfg,
@@ -227,7 +264,7 @@ def run_anota2seq(
     r_script = scratch / "run_anota2seq.R"
     r_script.write_text(RSCRIPT_TEMPLATE)
 
-    rscript_bin = cfg.rscript_path or "Rscript"
+    rscript_bin = resolve_rscript(cfg)
     cmd = [rscript_bin, str(r_script), str(spec_path), str(scratch)]
     logger.info("exec: %s", " ".join(shlex.quote(c) for c in cmd))
     start = time.time()
@@ -268,22 +305,14 @@ def run_anota2seq(
             scratch_dir=scratch,
         )
 
-    def _read(name: str) -> pd.DataFrame:
-        p = scratch / f"{name}.tsv"
-        if not p.exists() or p.stat().st_size == 0:
-            return pd.DataFrame()
-        try:
-            return pd.read_csv(p, sep="\t")
-        except Exception:
-            return pd.DataFrame()
-
+    cached = _read_cached_outputs(scratch)
     dur = time.time() - start
     return Anota2seqResult(
         contrast=contrast,
         ok=True,
         message=f"anota2seq complete in {dur:.1f}s",
-        translation=_read("translation"),
-        buffering=_read("buffering"),
-        mrna_abundance=_read("mrna_abundance"),
+        translation=cached["translation"],
+        buffering=cached["buffering"],
+        mrna_abundance=cached["mrna_abundance"],
         scratch_dir=scratch,
     )

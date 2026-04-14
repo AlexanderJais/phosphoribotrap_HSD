@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -27,6 +26,7 @@ from phosphotrap.config import (
     AppConfig,
     contrasts_for_reference,
     reconcile_contrasts,
+    resolve_rscript,
 )
 from phosphotrap.deseq2_runner import run_deseq2_interaction
 from phosphotrap.fpkm import (
@@ -84,6 +84,8 @@ if "log_filter_staged_clear" not in st.session_state:
     st.session_state.log_filter_staged_clear = False
 if "analysis" not in st.session_state:
     st.session_state.analysis = {}  # keyed by contrast
+if "_preset_just_applied" not in st.session_state:
+    st.session_state._preset_just_applied = False
 
 
 cfg: AppConfig = st.session_state.cfg
@@ -93,6 +95,12 @@ disk_cfg: AppConfig = st.session_state.disk_config
 # Streamlit reruns don't stack handlers; if the user changes report_dir
 # and saves, the next rerun rotates the handler onto the new location.
 attach_file_handler(Path(cfg.report_dir) / "logs")
+
+# Sample records are derived from st.session_state.sample_df and used
+# by every tab. Compute once per rerun rather than 5+ times scattered
+# through the tab bodies — same input, same output, no point.
+sample_records = to_records(st.session_state.sample_df)
+ready_samples = ready_records(sample_records)
 
 # ----------------------------------------------------------------------
 # Tabs
@@ -181,7 +189,12 @@ with tabs[0]:
             # reflects the preset values regardless of prior user edits.
             for key, value in CHRONIC_PRESET.items():
                 st.session_state[f"widget_{key}"] = value
+            # Flag a one-shot confirmation banner for the next render.
+            st.session_state._preset_just_applied = True
             st.rerun()
+        if st.session_state._preset_just_applied:
+            st.success("Chronic-stimulus preset applied.")
+            st.session_state._preset_just_applied = False
 
     # ------------------------------------------------------------------
     # anota2seq thresholds. Each number_input has an explicit widget key
@@ -243,7 +256,7 @@ with tabs[0]:
             logger.info("config saved to %s", path)
     with bcol2:
         if st.button("Check environment"):
-            env = check_environment(cfg.rscript_path or "Rscript")
+            env = check_environment(resolve_rscript(cfg))
             rows = [{"tool": k, **v} for k, v in env.items()]
             st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
@@ -284,9 +297,11 @@ with tabs[1]:
             if not cfg.fastq_dir:
                 st.error("Set a fastq directory in Config first.")
             else:
-                recs = to_records(st.session_state.sample_df)
-                populate_fastq_paths(recs, Path(cfg.fastq_dir))
-                st.session_state.sample_df = records_to_df(recs)
+                # This button mutates sample_df and reruns; the cached
+                # sample_records/ready_samples above will be
+                # recomputed from the fresh df on the next rerun.
+                populate_fastq_paths(sample_records, Path(cfg.fastq_dir))
+                st.session_state.sample_df = records_to_df(sample_records)
                 st.rerun()
     with c3:
         st.download_button(
@@ -297,11 +312,12 @@ with tabs[1]:
         )
 
     st.subheader("Summary")
-    records = to_records(st.session_state.sample_df)
-    ready = ready_records(records)
-    st.json(summary(records))
-    st.write(f"**{len(ready)} / {len(records)} samples have existing R1 + R2 fastq files.**")
-    by_group = pairs_by_group(ready)
+    st.json(summary(sample_records))
+    st.write(
+        f"**{len(ready_samples)} / {len(sample_records)} samples have existing "
+        "R1 + R2 fastq files.**"
+    )
+    by_group = pairs_by_group(ready_samples)
     for g in GROUPS:
         n = len(by_group.get(g, []))
         st.write(f"- {g}: {n} matched IP/INPUT pair(s)")
@@ -316,16 +332,14 @@ with tabs[2]:
         "No dedup step — IP enrichment drives the duplication rate, do not strip it."
     )
 
-    recs = to_records(st.session_state.sample_df)
-    ready = ready_records(recs)
-    options = [r.name() for r in ready]
+    options = [r.name() for r in ready_samples]
     selected_names = st.multiselect(
         "Samples to run",
         options=options,
         default=options,
         help="Only samples whose R1+R2 fastq paths already exist are listed.",
     )
-    selected = [r for r in ready if r.name() in selected_names]
+    selected = [r for r in ready_samples if r.name() in selected_names]
 
     dry_run = st.checkbox("Dry run (environment check only)")
 
@@ -360,7 +374,7 @@ with tabs[2]:
                     force=cfg.force_rerun,
                     progress_cb=cb,
                     dry_run=dry_run,
-                    rscript_path=cfg.rscript_path or "Rscript",
+                    rscript_path=resolve_rscript(cfg),
                 )
             except Exception as exc:
                 logger.exception("pipeline crashed")
@@ -389,25 +403,38 @@ with tabs[3]:
         options=available_contrasts,
         help="anota2seq, sign-consistency, and Mann-Whitney are all run per contrast.",
     )
-    alt_group, ref_group = contrast.split("_vs_") if contrast else (None, None)
+    alt_group, ref_group = contrast.split("_vs_")
 
     if st.button("Load salmon quant outputs"):
-        recs = to_records(st.session_state.sample_df)
-        ready = ready_records(recs)
         try:
-            counts, eff, fpkm = load_salmon_matrix(
-                ready, Path(cfg.output_dir) / "salmon"
+            result = load_salmon_matrix(
+                ready_samples, Path(cfg.output_dir) / "salmon"
             )
-            st.session_state.setdefault("salmon_matrices", {})
             st.session_state.salmon_matrices = {
-                "counts": counts, "eff": eff, "fpkm": fpkm, "records": ready,
+                "counts": result.counts,
+                "eff": result.eff_length,
+                "fpkm": result.fpkm,
+                "records": result.loaded,
+                "missing": result.missing,
             }
-            st.success(f"Loaded {fpkm.shape[0]} genes × {fpkm.shape[1]} samples")
+            msg = (
+                f"Loaded {result.fpkm.shape[0]} genes × "
+                f"{result.fpkm.shape[1]} samples"
+            )
+            if result.missing:
+                st.warning(
+                    msg
+                    + f" — {len(result.missing)} sample(s) had no salmon output: "
+                    + ", ".join(r.name() for r in result.missing)
+                )
+            else:
+                st.success(msg)
         except Exception as exc:
+            logger.exception("load_salmon_matrix crashed")
             st.error(f"Failed to load salmon output: {exc}")
 
     matrices = st.session_state.get("salmon_matrices")
-    if matrices:
+    if matrices and not matrices["fpkm"].empty:
         st.subheader("FPKM preview (top 20 rows)")
         st.dataframe(matrices["fpkm"].head(20), use_container_width=True)
         st.download_button(
@@ -440,11 +467,9 @@ with tabs[3]:
             st.success(f"Ratios + Mann-Whitney computed for {contrast}")
 
     if run_anota:
-        recs = to_records(st.session_state.sample_df)
-        ready = ready_records(recs)
         with st.spinner("Shelling out to anota2seq..."):
             res = run_anota2seq(
-                ready,
+                ready_samples,
                 alt_group=alt_group,
                 ref_group=ref_group,
                 salmon_root=Path(cfg.output_dir) / "salmon",
@@ -465,11 +490,9 @@ with tabs[3]:
             )
 
     if run_deseq:
-        recs = to_records(st.session_state.sample_df)
-        ready = ready_records(recs)
         with st.spinner("Shelling out to DESeq2..."):
             res = run_deseq2_interaction(
-                ready,
+                ready_samples,
                 alt_group=alt_group,
                 ref_group=ref_group,
                 salmon_root=Path(cfg.output_dir) / "salmon",
@@ -507,9 +530,9 @@ with tabs[3]:
         )
         try:
             t = cr.table.copy()
-            t["-log10_p"] = -np.log10(t["mannwhitney_p"].replace(0, np.nan))
+            t["-log10_p"] = -np.log10(t["mannwhitney_p"])
             fig = px.scatter(
-                t.reset_index().rename(columns={"index": "gene_id"}),
+                t.reset_index(),
                 x="delta_log2",
                 y="-log10_p",
                 hover_data=["gene_id"],
@@ -540,7 +563,7 @@ with tabs[3]:
         st.plotly_chart(fig, use_container_width=True)
 
         if cr is not None and not cr.table.empty:
-            top30 = cr.table.head(30).reset_index().rename(columns={"index": "gene_id"})
+            top30 = cr.table.head(30).reset_index()
             fig2 = px.bar(
                 top30,
                 x="delta_log2",

@@ -47,13 +47,10 @@ logger = get_logger()
 # Salmon quant loading + FPKM computation
 # ----------------------------------------------------------------------
 def _read_quant_genes(sample_dir: Path) -> pd.DataFrame:
-    """Read ``quant.genes.sf`` if present, else build it from ``quant.sf``."""
+    """Read ``quant.genes.sf`` from a salmon output directory."""
     gene_path = sample_dir / "quant.genes.sf"
     if gene_path.exists():
-        df = pd.read_csv(gene_path, sep="\t")
-        # Normalise column names.
-        rename = {"Name": "gene_id", "Length": "Length", "EffectiveLength": "EffectiveLength"}
-        df = df.rename(columns=rename)
+        df = pd.read_csv(gene_path, sep="\t").rename(columns={"Name": "gene_id"})
         return df[["gene_id", "Length", "EffectiveLength", "NumReads"]]
 
     tx_path = sample_dir / "quant.sf"
@@ -64,18 +61,42 @@ def _read_quant_genes(sample_dir: Path) -> pd.DataFrame:
     )
 
 
+@dataclass
+class SalmonLoadResult:
+    counts: pd.DataFrame
+    eff_length: pd.DataFrame
+    fpkm: pd.DataFrame
+    loaded: list[SampleRecord]    # records whose quant output was read
+    missing: list[SampleRecord]   # records whose salmon output is absent
+
+
 def load_salmon_matrix(
     records: Iterable[SampleRecord], salmon_root: Path
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Load NumReads, EffectiveLength, and FPKM gene × sample matrices."""
+) -> SalmonLoadResult:
+    """Load NumReads, EffectiveLength, and FPKM gene × sample matrices.
+
+    Records without salmon output on disk are skipped (and logged) so
+    a single missing ``quant.genes.sf`` does not crash the whole
+    Analysis tab. The caller gets explicit ``loaded`` / ``missing``
+    record lists alongside the matrices, which the UI uses to tell
+    the user exactly which samples still need salmon.
+    """
     salmon_root = Path(salmon_root)
+    records_list = list(records)
     counts: dict[str, pd.Series] = {}
     eff_lens: dict[str, pd.Series] = {}
     shared_idx: Optional[pd.Index] = None
+    loaded: list[SampleRecord] = []
+    missing: list[SampleRecord] = []
 
-    for rec in records:
+    for rec in records_list:
         sdir = salmon_root / rec.name()
-        df = _read_quant_genes(sdir)
+        try:
+            df = _read_quant_genes(sdir)
+        except FileNotFoundError as exc:
+            logger.warning("salmon output missing for %s: %s", rec.name(), exc)
+            missing.append(rec)
+            continue
         df = df.set_index("gene_id")
         counts[rec.name()] = df["NumReads"]
         eff_lens[rec.name()] = df["EffectiveLength"]
@@ -83,14 +104,27 @@ def load_salmon_matrix(
             shared_idx = df.index
         else:
             shared_idx = shared_idx.intersection(df.index)
+        loaded.append(rec)
 
     if shared_idx is None or len(shared_idx) == 0:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return SalmonLoadResult(
+            counts=pd.DataFrame(),
+            eff_length=pd.DataFrame(),
+            fpkm=pd.DataFrame(),
+            loaded=loaded,
+            missing=missing,
+        )
 
     counts_df = pd.DataFrame(counts).loc[shared_idx].fillna(0.0)
     eff_df = pd.DataFrame(eff_lens).loc[shared_idx].fillna(0.0)
     fpkm_df = compute_fpkm(counts_df, eff_df)
-    return counts_df, eff_df, fpkm_df
+    return SalmonLoadResult(
+        counts=counts_df,
+        eff_length=eff_df,
+        fpkm=fpkm_df,
+        loaded=loaded,
+        missing=missing,
+    )
 
 
 def compute_fpkm(counts: pd.DataFrame, eff_length: pd.DataFrame) -> pd.DataFrame:
@@ -233,6 +267,12 @@ def between_group_contrast(
     # Simple BH FDR
     p_adj = _bh_fdr(p_vals)
 
+    # Tie-break by |delta_log2| desc so that at n=3-vs-3, where
+    # mannwhitney_p can only take a handful of discrete values
+    # (≈0.1, 0.2, 0.4, 0.7, 1.0), the most biologically interesting
+    # genes in each p-tier sort to the top instead of falling out in
+    # arbitrary index order.
+    abs_delta = np.abs(delta.values)
     table = pd.DataFrame(
         {
             f"mean_log2_{alt_group}": mean_alt.values,
@@ -240,9 +280,14 @@ def between_group_contrast(
             "delta_log2": delta.values,
             "mannwhitney_p": p_vals,
             "mannwhitney_padj": p_adj,
+            "_abs_delta": abs_delta,
         },
         index=ratios.ratios.index,
-    ).sort_values("mannwhitney_p", na_position="last")
+    ).sort_values(
+        ["mannwhitney_p", "_abs_delta"],
+        ascending=[True, False],
+        na_position="last",
+    ).drop(columns=["_abs_delta"])
     ranked = pd.DataFrame({"gene_id": table.index, "score": table["delta_log2"].values})
     ranked = ranked.sort_values("score", ascending=False, na_position="last")
     return ContrastResult(

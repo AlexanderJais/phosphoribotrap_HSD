@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .config import AppConfig
+from .config import AppConfig, resolve_rscript
 from .logger import get_logger
 from .samples import SampleRecord, records_for_contrast
 
@@ -113,6 +113,22 @@ def run_deseq2_interaction(
             scratch_dir=scratch,
         )
 
+    # Skip-if-cached — same pattern as anota2seq. Gated by cfg.force_rerun.
+    cached_table = scratch / "interaction.tsv"
+    if not cfg.force_rerun and cached_table.exists() and cached_table.stat().st_size > 0:
+        try:
+            table = pd.read_csv(cached_table, sep="\t")
+            logger.info("DESeq2 cache hit for %s", contrast)
+            return DESeq2Result(
+                contrast=contrast,
+                ok=True,
+                message=f"DESeq2 cache hit for {contrast} (force_rerun to regenerate)",
+                table=table,
+                scratch_dir=scratch,
+            )
+        except Exception as exc:
+            logger.warning("DESeq2 cache read failed for %s: %s", contrast, exc)
+
     # Flatten 6 pairs into 12 libraries in deterministic order.
     subset: list[SampleRecord] = []
     for p in contrast_pairs:
@@ -133,7 +149,7 @@ def run_deseq2_interaction(
     r_script = scratch / "run_deseq2.R"
     r_script.write_text(RSCRIPT_TEMPLATE)
 
-    rscript_bin = cfg.rscript_path or "Rscript"
+    rscript_bin = resolve_rscript(cfg)
     cmd = [rscript_bin, str(r_script), str(spec_path), str(scratch)]
     logger.info("exec: %s", " ".join(shlex.quote(c) for c in cmd))
     start = time.time()

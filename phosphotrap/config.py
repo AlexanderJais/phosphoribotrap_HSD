@@ -42,6 +42,18 @@ def is_safe_contrast(value: str) -> bool:
     return bool(value) and _CONTRAST_RE.fullmatch(value) is not None
 
 
+def resolve_rscript(cfg: "AppConfig") -> str:
+    """Return the Rscript binary to invoke, falling back to PATH lookup.
+
+    The Config tab lets the user point at a specific ``Rscript`` — e.g.
+    one inside a conda env. An empty string means "use whatever's on
+    PATH". This helper centralises the ``cfg.rscript_path or "Rscript"``
+    idiom that was duplicated across the pipeline / anota2seq / DESeq2
+    runners.
+    """
+    return cfg.rscript_path or "Rscript"
+
+
 def contrasts_for_reference(ref_group: str, all_groups: tuple[str, ...]) -> list[str]:
     """Return the canonical contrast list for a given reference group.
 

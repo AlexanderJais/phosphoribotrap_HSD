@@ -13,6 +13,7 @@ from phosphotrap.config import (
     is_safe_contrast,
     is_safe_token,
     reconcile_contrasts,
+    resolve_rscript,
 )
 
 
@@ -163,3 +164,13 @@ def test_load_all_bad_contrasts_falls_through_to_default(tmp_path: Path):
     }))
     cfg = AppConfig.load(p)
     assert cfg.contrasts == list(DEFAULT_CONTRASTS)
+
+
+def test_resolve_rscript_returns_configured_value():
+    cfg = AppConfig(rscript_path="/opt/conda/envs/phosphotrap/bin/Rscript")
+    assert resolve_rscript(cfg) == "/opt/conda/envs/phosphotrap/bin/Rscript"
+
+
+def test_resolve_rscript_empty_falls_back_to_path_lookup():
+    cfg = AppConfig(rscript_path="")
+    assert resolve_rscript(cfg) == "Rscript"

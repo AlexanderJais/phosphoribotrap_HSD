@@ -9,7 +9,6 @@ after ticking mid-sample at least once.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 from unittest.mock import patch
 
 from phosphotrap import pipeline as pipeline_mod

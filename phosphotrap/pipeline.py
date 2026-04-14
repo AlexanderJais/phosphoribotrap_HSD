@@ -39,13 +39,15 @@ class StepResult:
     message: str
 
 
-class PipelineError(RuntimeError):
-    pass
-
-
 # ----------------------------------------------------------------------
 # Environment
 # ----------------------------------------------------------------------
+# Per-probe timeout for R package loads. A cold R startup usually
+# completes well under 5 s; 10 s leaves headroom without freezing the
+# UI for minutes if a package is hung.
+_R_PROBE_TIMEOUT_S = 10
+
+
 def check_environment(rscript: str = "Rscript") -> dict[str, dict]:
     """Probe for fastp / salmon / Rscript + critical R packages."""
     report: dict[str, dict] = {}
@@ -66,7 +68,7 @@ def check_environment(rscript: str = "Rscript") -> dict[str, dict]:
                 [path, "-e", f'suppressMessages(library({pkg})); cat("ok")'],
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=_R_PROBE_TIMEOUT_S,
             )
             ok = proc.returncode == 0 and "ok" in (proc.stdout or "")
             report[f"R:{pkg}"] = {

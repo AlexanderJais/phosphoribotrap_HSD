@@ -56,13 +56,6 @@ def _has_stream_handler(logger: logging.Logger) -> bool:
     )
 
 
-def _has_file_handler(logger: logging.Logger) -> bool:
-    return any(
-        _has_tag(h) and isinstance(h, logging.handlers.RotatingFileHandler)
-        for h in logger.handlers
-    )
-
-
 def get_logger() -> logging.Logger:
     """Return the package logger. Side-effect-free on the filesystem.
 
