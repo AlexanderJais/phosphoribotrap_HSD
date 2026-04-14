@@ -330,3 +330,158 @@ def test_neg_log10_handles_zero_and_negative():
     assert np.isnan(out[2])
     assert np.isnan(out[3])
     assert pytest.approx(out[4], abs=1e-9) == 0.0
+
+
+# ----------------------------------------------------------------------
+# per_gene_strip
+# ----------------------------------------------------------------------
+def _fake_ratio_data() -> tuple[pd.DataFrame, dict[str, list[str]]]:
+    """Synthetic ratios DataFrame + pair_labels dict matching the
+    ``RatioResult`` shape from phosphotrap.fpkm."""
+    genes = ["ENSMUSG_GAL", "ENSMUSG_GALR1", "ENSMUSG_BDNF"]
+    cols = [
+        "NCD_rep1", "NCD_rep3", "NCD_rep4",
+        "HSD1_rep5", "HSD1_rep6", "HSD1_rep8",
+        "HSD3_rep9", "HSD3_rep10", "HSD3_rep11",
+    ]
+    data = {
+        "NCD_rep1":  [0.0, 0.1, -0.2],
+        "NCD_rep3":  [0.1, 0.0, -0.1],
+        "NCD_rep4":  [-0.1, 0.2, 0.0],
+        "HSD1_rep5": [0.8, 0.5, 0.3],
+        "HSD1_rep6": [0.9, 0.6, 0.4],
+        "HSD1_rep8": [0.7, 0.4, 0.5],
+        "HSD3_rep9": [1.2, 0.9, 0.1],
+        "HSD3_rep10":[1.1, 0.8, 0.2],
+        "HSD3_rep11":[1.3, 1.0, 0.0],
+    }
+    ratios = pd.DataFrame(data, index=genes, columns=cols)
+    pair_labels = {
+        "NCD":  ["NCD_rep1", "NCD_rep3", "NCD_rep4"],
+        "HSD1": ["HSD1_rep5", "HSD1_rep6", "HSD1_rep8"],
+        "HSD3": ["HSD3_rep9", "HSD3_rep10", "HSD3_rep11"],
+    }
+    return ratios, pair_labels
+
+
+def test_per_gene_strip_returns_figure_for_three_genes():
+    ratios, pair_labels = _fake_ratio_data()
+    gene_labels = {
+        "ENSMUSG_GAL": "Gal",
+        "ENSMUSG_GALR1": "Galr1",
+        "ENSMUSG_BDNF": "Bdnf",
+    }
+    fig = fig_mod.per_gene_strip(
+        ratios,
+        pair_labels,
+        title="Galanin signaling — log2(IP/Input)",
+        gene_labels=gene_labels,
+        primary_ids={"ENSMUSG_GAL", "ENSMUSG_GALR1"},
+    )
+    assert isinstance(fig, go.Figure)
+    # 3 genes × (1 dot trace per group + 1 mean trace per gene)
+    # = 3 genes × (3 dot + 1 mean) = 12 traces total.
+    assert len(fig.data) == 12
+
+
+def test_per_gene_strip_dot_count_matches_animals_per_group():
+    ratios, pair_labels = _fake_ratio_data()
+    gene_labels = {"ENSMUSG_GAL": "Gal"}
+    fig = fig_mod.per_gene_strip(
+        ratios, pair_labels, title="t", gene_labels=gene_labels,
+    )
+    # 3 dot traces (one per group), each with 3 animals.
+    dot_traces = [
+        t for t in fig.data
+        if t.mode == "markers"
+        and getattr(t.marker, "symbol", None) not in ("line-ew",)
+    ]
+    assert len(dot_traces) == 3
+    for trace in dot_traces:
+        assert len(trace.x) == 3
+        assert len(trace.y) == 3
+
+
+def test_per_gene_strip_primary_vs_secondary_color():
+    ratios, pair_labels = _fake_ratio_data()
+    gene_labels = {"ENSMUSG_GAL": "Gal", "ENSMUSG_BDNF": "Bdnf"}
+    fig = fig_mod.per_gene_strip(
+        ratios, pair_labels, title="t",
+        gene_labels=gene_labels,
+        primary_ids={"ENSMUSG_GAL"},
+        primary_color="#dc2626",
+        secondary_color="#2563eb",
+    )
+    # Find dot traces by legendgroup.
+    galanin_dots = [
+        t for t in fig.data
+        if getattr(t, "legendgroup", None) == "galanin"
+    ]
+    custom_dots = [
+        t for t in fig.data
+        if getattr(t, "legendgroup", None) == "custom"
+    ]
+    assert galanin_dots, "expected at least one galanin-coloured dot trace"
+    assert custom_dots, "expected at least one custom-coloured dot trace"
+    assert all(t.marker.color == "#dc2626" for t in galanin_dots)
+    assert all(t.marker.color == "#2563eb" for t in custom_dots)
+
+
+def test_per_gene_strip_skips_gene_not_in_ratios():
+    ratios, pair_labels = _fake_ratio_data()
+    # Request a gene that isn't in ratios — should be silently dropped.
+    gene_labels = {
+        "ENSMUSG_GAL": "Gal",
+        "ENSMUSG_MISSING": "Ghost",
+    }
+    fig = fig_mod.per_gene_strip(
+        ratios, pair_labels, title="t", gene_labels=gene_labels,
+    )
+    # Only 1 gene actually rendered = 3 dot traces + 1 mean = 4.
+    assert len(fig.data) == 4
+
+
+def test_per_gene_strip_empty_inputs_returns_placeholder():
+    fig = fig_mod.per_gene_strip(
+        pd.DataFrame(), {}, title="t", gene_labels={"X": "X"},
+    )
+    assert isinstance(fig, go.Figure)
+    annotations = fig.layout.annotations or ()
+    assert any("No ratio data" in (a.text or "") for a in annotations)
+
+
+def test_per_gene_strip_respects_group_order():
+    ratios, pair_labels = _fake_ratio_data()
+    gene_labels = {"ENSMUSG_GAL": "Gal"}
+    fig = fig_mod.per_gene_strip(
+        ratios, pair_labels, title="t", gene_labels=gene_labels,
+        group_order=["HSD3", "HSD1", "NCD"],
+    )
+    # x-axis category array should match the explicit group_order.
+    # Plotly stores it on layout.xaxis.categoryarray.
+    cat_array = fig.layout.xaxis.categoryarray
+    assert list(cat_array) == ["HSD3", "HSD1", "NCD"]
+
+
+def test_per_gene_strip_shared_y_range():
+    ratios, pair_labels = _fake_ratio_data()
+    gene_labels = {
+        "ENSMUSG_GAL": "Gal",
+        "ENSMUSG_GALR1": "Galr1",
+        "ENSMUSG_BDNF": "Bdnf",
+    }
+    fig = fig_mod.per_gene_strip(
+        ratios, pair_labels, title="t", gene_labels=gene_labels,
+    )
+    # Every y axis should share the same range (padding makes it
+    # slightly wider than the raw min/max).
+    y_ranges = []
+    for key in fig.layout:
+        if key.startswith("yaxis"):
+            axis = fig.layout[key]
+            if axis.range is not None:
+                y_ranges.append(tuple(axis.range))
+    assert len(y_ranges) >= 3
+    assert len(set(y_ranges)) == 1, (
+        f"expected all subplots to share one y range, got {y_ranges}"
+    )

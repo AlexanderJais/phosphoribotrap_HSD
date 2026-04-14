@@ -200,6 +200,219 @@ def resolve_symbols(
 
 
 # ----------------------------------------------------------------------
+# Per-gene log2(IP/Input) strip plot
+# ----------------------------------------------------------------------
+def per_gene_strip(
+    ratios: pd.DataFrame,
+    pair_labels: dict[str, list[str]],
+    *,
+    title: str,
+    gene_labels: dict[str, str],
+    font_size: int = DEFAULT_FONT_SIZE,
+    group_order: Optional[list[str]] = None,
+    primary_color: str = COLOR_GALANIN,
+    secondary_color: str = COLOR_CUSTOM,
+    primary_ids: Optional[set[str]] = None,
+) -> go.Figure:
+    """Per-gene strip plot of log2(IP/Input) ratios grouped by diet.
+
+    For each gene in ``gene_labels`` we render one subplot with:
+
+    * **Individual dots** — one per animal (3 per group for this
+      design), placed on a categorical x axis by group.
+    * **Group means** — a short horizontal bar drawn on top of the
+      dots. Makes the effect direction visible at a glance even when
+      the n-per-group is small enough that the dots don't visually
+      cluster.
+
+    The dot colour is ``primary_color`` when the gene is in
+    ``primary_ids`` (galanin core) and ``secondary_color`` otherwise.
+    Callers typically pass ``primary_ids = set(galanin_resolved)``.
+
+    ``ratios`` is ``RatioResult.ratios`` — a (gene_id × pair_label)
+    dataframe where each column is a single animal's
+    ``log2(IP_FPKM / Input_FPKM)``. ``pair_labels`` is
+    ``RatioResult.pair_labels``: a mapping from group name to the list
+    of pair-label column names for that group (e.g.
+    ``{"NCD": ["NCD_rep1", "NCD_rep3", "NCD_rep4"], ...}``).
+
+    Returns a placeholder figure with a centered annotation when the
+    inputs don't contain a single plottable gene × group combination,
+    so the Figures tab can render the panel slot before the user has
+    loaded salmon output.
+    """
+    from plotly.subplots import make_subplots
+
+    gene_ids = [g for g in gene_labels if g in ratios.index]
+    if not gene_ids or not pair_labels:
+        fig = go.Figure()
+        fig.update_layout(
+            **_theme_with_title(font_size, title),
+            annotations=[
+                {
+                    "text": "No ratio data for the requested genes.",
+                    "showarrow": False,
+                    "font": {"size": font_size},
+                    "xref": "paper",
+                    "yref": "paper",
+                    "x": 0.5,
+                    "y": 0.5,
+                }
+            ],
+        )
+        return fig
+
+    groups = list(group_order) if group_order else list(pair_labels.keys())
+    primary_ids = primary_ids or set()
+
+    # Subplot grid — up to 4 columns, rows as needed. Keeps each
+    # panel large enough for individual animals to be distinguishable
+    # without overflowing the page width.
+    n = len(gene_ids)
+    cols = min(n, 4)
+    rows = (n + cols - 1) // cols
+
+    fig = make_subplots(
+        rows=rows,
+        cols=cols,
+        subplot_titles=[gene_labels[g] for g in gene_ids],
+        horizontal_spacing=0.08,
+        vertical_spacing=0.14,
+        shared_yaxes=False,
+    )
+
+    # Collect all y values up front so every subplot shares the same
+    # y range — lets the reader compare effect sizes across panels
+    # without misreading an autoscaled axis.
+    all_y: list[float] = []
+
+    for idx, gene_id in enumerate(gene_ids):
+        row = idx // cols + 1
+        col = idx % cols + 1
+        color = primary_color if gene_id in primary_ids else secondary_color
+        show_legend = idx == 0  # one legend entry per colour group
+
+        per_group_means: list[tuple[str, float]] = []
+
+        for group in groups:
+            labels = pair_labels.get(group, [])
+            if not labels:
+                continue
+            values = [
+                float(ratios.at[gene_id, lab])
+                for lab in labels
+                if lab in ratios.columns
+            ]
+            if not values:
+                continue
+            all_y.extend(values)
+
+            # Dots: one per animal.
+            fig.add_trace(
+                go.Scatter(
+                    x=[group] * len(values),
+                    y=values,
+                    mode="markers",
+                    marker={
+                        "color": color,
+                        "size": 9,
+                        "line": {"color": "#111111", "width": 0.8},
+                        "opacity": 0.95,
+                    },
+                    name="galanin" if gene_id in primary_ids else "custom",
+                    legendgroup="galanin" if gene_id in primary_ids else "custom",
+                    showlegend=show_legend,
+                    hovertemplate=(
+                        f"<b>{gene_labels[gene_id]}</b><br>"
+                        f"{group}<br>"
+                        "log<sub>2</sub>(IP/Input): %{y:.2f}<extra></extra>"
+                    ),
+                ),
+                row=row,
+                col=col,
+            )
+            per_group_means.append((group, float(np.mean(values))))
+
+        # Group-mean bars.
+        if per_group_means:
+            fig.add_trace(
+                go.Scatter(
+                    x=[g for g, _ in per_group_means],
+                    y=[m for _, m in per_group_means],
+                    mode="markers",
+                    marker={
+                        "symbol": "line-ew",
+                        "size": 26,
+                        "color": "#111111",
+                        "line": {"color": "#111111", "width": 3},
+                    },
+                    name="group mean",
+                    legendgroup="mean",
+                    showlegend=idx == 0,
+                    hoverinfo="skip",
+                ),
+                row=row,
+                col=col,
+            )
+
+    # Shared y range with a little head/tail padding, plus a zero line
+    # for every subplot so the direction of change is unambiguous.
+    if all_y:
+        y_min = min(all_y) - 0.3
+        y_max = max(all_y) + 0.3
+        for r in range(1, rows + 1):
+            for c in range(1, cols + 1):
+                fig.update_yaxes(
+                    range=[y_min, y_max],
+                    row=r,
+                    col=c,
+                    zeroline=True,
+                    zerolinecolor=COLOR_DIAGONAL,
+                    zerolinewidth=1,
+                    showline=True,
+                    linecolor="#111111",
+                    ticks="outside",
+                )
+                fig.update_xaxes(
+                    row=r,
+                    col=c,
+                    categoryorder="array",
+                    categoryarray=groups,
+                    showline=True,
+                    linecolor="#111111",
+                    ticks="outside",
+                )
+
+    # One shared y-axis label, placed via layout annotation so it
+    # spans the whole figure rather than repeating per-subplot.
+    fig.update_layout(
+        **_theme_with_title(font_size, title),
+        height=max(260 * rows, 320),
+        showlegend=True,
+        legend={
+            "orientation": "v",
+            "x": 1.02,
+            "y": 1.0,
+            "bgcolor": "rgba(255,255,255,0.9)",
+            "bordercolor": "#d1d5db",
+            "borderwidth": 1,
+        },
+    )
+    fig.add_annotation(
+        text="log<sub>2</sub>(IP / Input)",
+        xref="paper",
+        yref="paper",
+        x=-0.06,
+        y=0.5,
+        showarrow=False,
+        textangle=-90,
+        font={"family": NATURE_FONT_FAMILY, "size": font_size + 1},
+    )
+
+    return fig
+
+
+# ----------------------------------------------------------------------
 # Volcano plot
 # ----------------------------------------------------------------------
 def _neg_log10(series: pd.Series) -> np.ndarray:
