@@ -303,6 +303,10 @@ with tabs[2]:
     dry_run = st.checkbox("Dry run (environment check only)")
 
     progress_bar = st.progress(st.session_state.progress_value, text=st.session_state.progress_msg)
+    st.caption(
+        "Progress is a smoothed line-count ramp from the subprocess output, "
+        "not a wall-clock ETA — fastp and salmon don't emit parseable progress."
+    )
 
     if st.button("Start pipeline", type="primary", disabled=not selected and not dry_run):
         # Auto-save current config first.
@@ -573,6 +577,12 @@ with tabs[4]:
     with rcol:
         if st.button("Refresh"):
             st.rerun()
+
+    st.caption(
+        "Filter is applied *before* tailing, so with a narrow filter you "
+        "may see old matching lines at the top rather than only recent log "
+        "activity. Showing up to 800 matching lines across rolled-over backups."
+    )
 
     tail = tail_log(Path(cfg.report_dir) / "logs", max_lines=800, filter_substr=filter_str)
     st.code(tail or "(log empty)", language="text")

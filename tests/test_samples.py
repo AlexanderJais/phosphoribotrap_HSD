@@ -76,3 +76,60 @@ def test_to_records_is_nan_safe():
     df.loc[len(df)] = blank
     recs = to_records(df)
     assert len(recs) == 18  # blank rows dropped, original 18 preserved
+
+
+def test_to_records_rejects_path_traversal_tokens():
+    """Dangerous group/ccg_id values must not survive into SampleRecords."""
+    import pandas as pd
+
+    df = pd.DataFrame([
+        {"ccg_id": "138011", "sample": "IP1", "comment": "",
+         "replicate": 1, "group": "NCD", "fraction": "IP"},
+        # Path-traversal attempt in group
+        {"ccg_id": "999999", "sample": "IPX", "comment": "",
+         "replicate": 5, "group": "../evil", "fraction": "IP"},
+        # Slash in ccg_id
+        {"ccg_id": "1380/11", "sample": "IPY", "comment": "",
+         "replicate": 6, "group": "NCD", "fraction": "IP"},
+        # Space + control char in group
+        {"ccg_id": "138099", "sample": "IPZ", "comment": "",
+         "replicate": 7, "group": "N CD", "fraction": "IP"},
+    ])
+    recs = to_records(df)
+    # Only the first (clean) row survives.
+    assert len(recs) == 1
+    assert recs[0].ccg_id == "138011"
+    assert recs[0].group == "NCD"
+
+
+def test_discover_fastqs_warns_on_no_matches(tmp_path):
+    """If files exist but none match the regex, the user should see a warning.
+
+    The phosphotrap logger is non-propagating, so pytest's ``caplog``
+    (which attaches at the root logger) never sees its records. Attach
+    a capturing handler directly to the named logger instead.
+    """
+    import logging
+
+    from phosphotrap.samples import discover_fastqs
+
+    # Put files with the wrong naming convention.
+    (tmp_path / "wrong_prefix_S1_L001_R1_001.fastq.gz").write_text("x")
+    (tmp_path / "wrong_prefix_S1_L001_R2_001.fastq.gz").write_text("x")
+
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Capture(level=logging.WARNING)
+    log = logging.getLogger("phosphotrap")
+    log.addHandler(handler)
+    try:
+        result = discover_fastqs(tmp_path)
+    finally:
+        log.removeHandler(handler)
+
+    assert result == {}
+    assert any("0 matched regex" in r.getMessage() for r in records)

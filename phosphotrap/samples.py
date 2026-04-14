@@ -18,6 +18,10 @@ from typing import Iterable
 
 import pandas as pd
 
+from .logger import get_logger
+
+logger = get_logger()
+
 GROUPS = ("NCD", "HSD1", "HSD3")
 FRACTIONS = ("IP", "INPUT")
 
@@ -25,6 +29,17 @@ FRACTIONS = ("IP", "INPUT")
 FASTQ_RE = re.compile(
     r"^A006200122_(?P<ccg>\d+)_S(?P<s>\d+)_L002_R(?P<r>[12])_001\.fastq\.gz$"
 )
+
+# Safe-token regex used to validate any user-editable string that ends
+# up in a filesystem path (group, fraction). SampleRecord.name() builds
+# output directory names from these columns, so an unvalidated ``../``
+# in a data_editor cell could escape output_dir. Only alnum + underscore
+# + hyphen permitted.
+_SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+
+
+def _is_safe_token(value: str) -> bool:
+    return bool(value) and _SAFE_TOKEN_RE.fullmatch(value) is not None
 
 
 @dataclass
@@ -95,9 +110,15 @@ def to_records(df: pd.DataFrame) -> list[SampleRecord]:
     NaN-safe — blank rows or half-filled rows from ``st.data_editor`` are
     skipped without raising. Rows missing any of ``ccg_id``, ``group``,
     or ``replicate`` are dropped.
+
+    Also enforces that ``group``, ``fraction``, and the CCG id are safe
+    filesystem tokens (alnum + underscore + hyphen only). Rows that
+    fail validation are dropped with a warning in the log rather than
+    silently producing path-traversal-prone output directories
+    downstream.
     """
     records: list[SampleRecord] = []
-    for _, row in df.iterrows():
+    for idx, row in df.iterrows():
         ccg = _clean_cell(row.get("ccg_id"))
         group = _clean_cell(row.get("group"))
         frac = _clean_cell(row.get("fraction")).upper() or "IP"
@@ -110,6 +131,25 @@ def to_records(df: pd.DataFrame) -> list[SampleRecord]:
             replicate = int(rep_raw)
         except (TypeError, ValueError):
             continue
+
+        fraction = frac if frac in FRACTIONS else "IP"
+
+        if not _is_safe_token(ccg):
+            logger.warning(
+                "sample row %s dropped: ccg_id %r is not a safe token", idx, ccg
+            )
+            continue
+        if not _is_safe_token(group):
+            logger.warning(
+                "sample row %s dropped: group %r is not a safe token", idx, group
+            )
+            continue
+        if not _is_safe_token(fraction):
+            logger.warning(
+                "sample row %s dropped: fraction %r is not a safe token", idx, fraction
+            )
+            continue
+
         records.append(
             SampleRecord(
                 ccg_id=ccg,
@@ -117,7 +157,7 @@ def to_records(df: pd.DataFrame) -> list[SampleRecord]:
                 comment=_clean_cell(row.get("comment")),
                 replicate=replicate,
                 group=group,
-                fraction=frac if frac in FRACTIONS else "IP",
+                fraction=fraction,
                 fastq_r1=_clean_cell(row.get("fastq_r1")),
                 fastq_r2=_clean_cell(row.get("fastq_r2")),
             )
@@ -133,18 +173,38 @@ def records_to_df(records: Iterable[SampleRecord]) -> pd.DataFrame:
 # Fastq discovery & pairing
 # ----------------------------------------------------------------------
 def discover_fastqs(directory: Path) -> dict[str, dict[str, Path]]:
-    """Return ``{ccg_id: {'R1': path, 'R2': path}}`` for the given directory."""
+    """Return ``{ccg_id: {'R1': path, 'R2': path}}`` for the given directory.
+
+    Warns if the directory contains ``*.fastq.gz`` files but none of
+    them match :data:`FASTQ_RE`. That usually means the vendor renamed
+    the files — different run prefix, lane, or read-tag format — and
+    the user needs to adjust the regex instead of wondering why the
+    Samples tab reports zero matches.
+    """
     directory = Path(directory)
     out: dict[str, dict[str, Path]] = {}
     if not directory.exists():
+        logger.warning("fastq directory %s does not exist", directory)
         return out
+
+    scanned = 0
     for p in sorted(directory.glob("*.fastq.gz")):
+        scanned += 1
         m = FASTQ_RE.match(p.name)
         if not m:
             continue
         ccg = m.group("ccg")
         read = "R" + m.group("r")
         out.setdefault(ccg, {})[read] = p
+
+    if scanned > 0 and not out:
+        logger.warning(
+            "discover_fastqs: scanned %d .fastq.gz file(s) in %s, 0 matched "
+            "regex %r — check that the vendor prefix / lane / read tag match",
+            scanned, directory, FASTQ_RE.pattern,
+        )
+    elif scanned == 0:
+        logger.info("discover_fastqs: no .fastq.gz files in %s", directory)
     return out
 
 

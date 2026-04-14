@@ -80,3 +80,34 @@ def test_progress_fractions_are_monotonic_and_reach_one(tmp_path: Path):
     assert fractions[-1] == 1.0
     # At least one mid-sample tick (a value strictly between 0 and 1).
     assert any(0.0 < f < 1.0 for f in fractions)
+
+
+def test_empty_records_final_callback_has_nonnegative_indices(tmp_path: Path):
+    """Running with an empty record list must not emit sample_idx == -1."""
+    observed: list[tuple[int, int, float, str]] = []
+
+    def cb(sample_idx, step_idx, frac, msg):
+        observed.append((sample_idx, step_idx, frac, msg))
+
+    with patch.object(pipeline_mod, "run_fastp", side_effect=_fake_run_fastp), \
+         patch.object(pipeline_mod, "run_salmon", side_effect=_fake_run_salmon):
+        run_pipeline(
+            [],
+            salmon_index=tmp_path,
+            tx2gene=tmp_path / "tx2g.tsv",
+            output_dir=tmp_path / "out",
+            report_dir=tmp_path / "rep",
+            threads=2,
+            run_fastp_step=True,
+            libtype="A",
+            force=False,
+            progress_cb=cb,
+            dry_run=False,
+        )
+
+    assert observed, "callback was never called"
+    for sample_idx, step_idx, frac, _ in observed:
+        assert sample_idx >= 0
+        assert step_idx >= 0
+        assert 0.0 <= frac <= 1.0
+    assert observed[-1][2] == 1.0

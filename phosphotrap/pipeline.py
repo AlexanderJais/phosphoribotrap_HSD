@@ -351,5 +351,9 @@ def run_pipeline(
             logger.error("salmon failed for %s: %s", rec.name(), res.message)
 
     if progress_cb is not None:
-        progress_cb(n_samples - 1, steps_per_sample - 1, 1.0, "pipeline complete")
+        # Clamp indices for the empty-records case (len(records) == 0),
+        # where max(len, 1) made n_samples == 1 but the loop never ran.
+        final_sample = max(len(records) - 1, 0)
+        final_step = max(steps_per_sample - 1, 0)
+        progress_cb(final_sample, final_step, 1.0, "pipeline complete")
     return results
