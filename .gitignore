@@ -1,0 +1,17 @@
+# Runtime artefacts
+logs/
+output/
+config/phosphotrap.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# Env
+.venv/
+venv/
+.env
