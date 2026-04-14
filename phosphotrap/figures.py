@@ -200,6 +200,251 @@ def resolve_symbols(
 
 
 # ----------------------------------------------------------------------
+# Cross-contrast consistency scatter
+# ----------------------------------------------------------------------
+def cross_contrast_scatter(
+    contrast_a: pd.DataFrame,
+    contrast_b: pd.DataFrame,
+    *,
+    label_a: str,
+    label_b: str,
+    title: str,
+    delta_col: str = "delta_log2",
+    highlight_primary: Optional[dict[str, str]] = None,
+    highlight_secondary: Optional[dict[str, str]] = None,
+    font_size: int = DEFAULT_FONT_SIZE,
+    primary_color: str = COLOR_GALANIN,
+    secondary_color: str = COLOR_CUSTOM,
+) -> go.Figure:
+    """Scatter of ``delta_log2`` in contrast A vs contrast B, per gene.
+
+    A 3-vs-3 design has very little statistical power on any single
+    contrast. Cross-contrast consistency is the single most useful
+    piece of evidence you can put in a manuscript: a gene that moves
+    in the same direction under BOTH HSD1 and HSD3 is far more
+    believable than a single-contrast nominal hit. Points near the
+    diagonal are consistent across both conditions; points in the
+    off-diagonal quadrants are inconsistent and should be deprioritised.
+
+    Inputs are the ``.table`` DataFrames from two
+    :class:`phosphotrap.fpkm.ContrastResult` objects (one per contrast),
+    indexed by ``gene_id``. Only genes present in BOTH tables are
+    plotted; the intersection is silent — callers are expected to
+    check matrix shapes upstream if they care about dropped genes.
+
+    Layers, bottom-to-top:
+
+    1. Background cloud of all shared genes in ``COLOR_BACKGROUND``.
+    2. Diagonal ``y = x`` reference line (perfect reproducibility).
+    3. Primary highlights (galanin) — larger, crimson, labeled.
+    4. Secondary highlights (user's custom genes) — blue, labeled.
+
+    Axes are locked to the same range (min/max of all plotted data
+    plus 0.5 padding) so the diagonal is visually exactly 45°.
+    """
+    if contrast_a is None or contrast_b is None or contrast_a.empty or contrast_b.empty:
+        fig = go.Figure()
+        fig.update_layout(
+            **_theme_with_title(font_size, title),
+            annotations=[
+                {
+                    "text": "Need both contrast tables loaded.",
+                    "showarrow": False,
+                    "font": {"size": font_size},
+                    "xref": "paper",
+                    "yref": "paper",
+                    "x": 0.5,
+                    "y": 0.5,
+                }
+            ],
+        )
+        return fig
+
+    a = contrast_a[[delta_col]].rename(columns={delta_col: "_a"}).copy()
+    b = contrast_b[[delta_col]].rename(columns={delta_col: "_b"}).copy()
+    a.index = a.index.astype(str)
+    b.index = b.index.astype(str)
+    joined = a.join(b, how="inner")
+    joined = joined.dropna()
+
+    if joined.empty:
+        fig = go.Figure()
+        fig.update_layout(
+            **_theme_with_title(font_size, title),
+            annotations=[
+                {
+                    "text": "No genes in common between the two contrasts.",
+                    "showarrow": False,
+                    "font": {"size": font_size},
+                    "xref": "paper",
+                    "yref": "paper",
+                    "x": 0.5,
+                    "y": 0.5,
+                }
+            ],
+        )
+        return fig
+
+    highlight_primary = highlight_primary or {}
+    highlight_secondary = highlight_secondary or {}
+    highlight_ids = set(highlight_primary) | set(highlight_secondary)
+    bg_mask = ~joined.index.isin(highlight_ids)
+
+    fig = go.Figure()
+
+    # Background cloud.
+    bg = joined.loc[bg_mask]
+    fig.add_trace(
+        go.Scattergl(
+            x=bg["_a"],
+            y=bg["_b"],
+            mode="markers",
+            marker={
+                "color": COLOR_BACKGROUND,
+                "size": 4,
+                "opacity": 0.6,
+                "line": {"width": 0},
+            },
+            name="all genes",
+            hovertemplate=(
+                "%{customdata}<br>"
+                f"{label_a}: %{{x:.2f}}<br>"
+                f"{label_b}: %{{y:.2f}}<extra></extra>"
+            ),
+            customdata=bg.index,
+        )
+    )
+
+    # Diagonal + zero lines. Compute the shared axis range first so
+    # the diagonal covers the visible area exactly.
+    x_vals = joined["_a"].to_numpy()
+    y_vals = joined["_b"].to_numpy()
+    lo = float(min(x_vals.min(), y_vals.min())) - 0.5
+    hi = float(max(x_vals.max(), y_vals.max())) + 0.5
+
+    fig.add_trace(
+        go.Scatter(
+            x=[lo, hi],
+            y=[lo, hi],
+            mode="lines",
+            line={"color": COLOR_DIAGONAL, "width": 1, "dash": "dash"},
+            name="y = x",
+            hoverinfo="skip",
+        )
+    )
+    fig.add_hline(
+        y=0,
+        line={"color": COLOR_DIAGONAL, "width": 1, "dash": "dot"},
+        opacity=0.4,
+    )
+    fig.add_vline(
+        x=0,
+        line={"color": COLOR_DIAGONAL, "width": 1, "dash": "dot"},
+        opacity=0.4,
+    )
+
+    # Primary highlights.
+    _add_cross_contrast_highlight(
+        fig,
+        joined=joined,
+        highlight=highlight_primary,
+        color=primary_color,
+        name="Galanin signaling",
+        label_a=label_a,
+        label_b=label_b,
+    )
+    # Secondary highlights.
+    _add_cross_contrast_highlight(
+        fig,
+        joined=joined,
+        highlight=highlight_secondary,
+        color=secondary_color,
+        name="Custom highlights",
+        label_a=label_a,
+        label_b=label_b,
+    )
+
+    fig.update_layout(
+        **_theme_with_title(font_size, title),
+        xaxis={
+            "title": f"log<sub>2</sub> FC — {label_a}",
+            "range": [lo, hi],
+            "zeroline": False,
+            "showline": True,
+            "linecolor": "#111111",
+            "ticks": "outside",
+        },
+        yaxis={
+            "title": f"log<sub>2</sub> FC — {label_b}",
+            "range": [lo, hi],
+            "zeroline": False,
+            "showline": True,
+            "linecolor": "#111111",
+            "ticks": "outside",
+            "scaleanchor": "x",  # lock aspect ratio so 1 x-unit == 1 y-unit
+            "scaleratio": 1,
+        },
+        legend={
+            "orientation": "v",
+            "x": 1.02,
+            "y": 1.0,
+            "bgcolor": "rgba(255,255,255,0.9)",
+            "bordercolor": "#d1d5db",
+            "borderwidth": 1,
+        },
+        showlegend=True,
+    )
+    return fig
+
+
+def _add_cross_contrast_highlight(
+    fig: go.Figure,
+    *,
+    joined: pd.DataFrame,
+    highlight: dict[str, str],
+    color: str,
+    name: str,
+    label_a: str,
+    label_b: str,
+) -> None:
+    """Internal helper — labeled scatter trace for one highlight set
+    on the cross-contrast figure. Same shape as ``_add_highlight_trace``
+    but with a two-axis hover template."""
+    if not highlight:
+        return
+    hl = joined.loc[joined.index.intersection(list(highlight.keys()))]
+    if hl.empty:
+        return
+    labels = [highlight[g] for g in hl.index]
+    fig.add_trace(
+        go.Scatter(
+            x=hl["_a"],
+            y=hl["_b"],
+            mode="markers+text",
+            marker={
+                "color": color,
+                "size": 12,
+                "line": {"color": "#111111", "width": 1},
+                "opacity": 0.95,
+            },
+            text=labels,
+            textposition="top center",
+            textfont={
+                "family": NATURE_FONT_FAMILY,
+                "size": 12,
+                "color": "#111111",
+            },
+            name=name,
+            hovertemplate=(
+                "<b>%{text}</b><br>"
+                f"{label_a}: %{{x:.2f}}<br>"
+                f"{label_b}: %{{y:.2f}}<extra></extra>"
+            ),
+        )
+    )
+
+
+# ----------------------------------------------------------------------
 # Expression heatmap
 # ----------------------------------------------------------------------
 def _zscore_rows(df: pd.DataFrame) -> pd.DataFrame:

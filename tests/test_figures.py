@@ -464,6 +464,145 @@ def test_per_gene_strip_respects_group_order():
 
 
 # ----------------------------------------------------------------------
+# cross_contrast_scatter
+# ----------------------------------------------------------------------
+def _fake_two_contrast_tables() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Two contrast tables sharing most genes; values are roughly
+    consistent so a diagonal is visible, with a handful of genes
+    moved off-diagonal to exercise the highlight layers."""
+    rng = np.random.default_rng(1)
+    genes = [f"ENSMUSG{str(i).zfill(11)}" for i in range(100)]
+    base_delta = rng.normal(0, 1.0, size=100)
+
+    a = pd.DataFrame(
+        {
+            "delta_log2": base_delta + rng.normal(0, 0.1, size=100),
+            "mannwhitney_p": rng.uniform(0, 1, size=100),
+            "mannwhitney_padj": rng.uniform(0, 1, size=100),
+        },
+        index=genes,
+    )
+    b = pd.DataFrame(
+        {
+            "delta_log2": base_delta + rng.normal(0, 0.1, size=100),
+            "mannwhitney_p": rng.uniform(0, 1, size=100),
+            "mannwhitney_padj": rng.uniform(0, 1, size=100),
+        },
+        index=genes,
+    )
+    return a, b
+
+
+def test_cross_contrast_scatter_returns_figure():
+    a, b = _fake_two_contrast_tables()
+    fig = fig_mod.cross_contrast_scatter(
+        a, b,
+        label_a="HSD1_vs_NCD",
+        label_b="HSD3_vs_NCD",
+        title="Cross-contrast consistency",
+    )
+    assert isinstance(fig, go.Figure)
+    # background + diagonal = at least 2 traces
+    assert len(fig.data) >= 2
+
+
+def test_cross_contrast_scatter_with_highlights_has_all_layers():
+    a, b = _fake_two_contrast_tables()
+    primary = {a.index[0]: "Gal", a.index[1]: "Galr1"}
+    secondary = {a.index[2]: "Bdnf"}
+    fig = fig_mod.cross_contrast_scatter(
+        a, b,
+        label_a="HSD1_vs_NCD",
+        label_b="HSD3_vs_NCD",
+        title="t",
+        highlight_primary=primary,
+        highlight_secondary=secondary,
+    )
+    trace_names = [t.name for t in fig.data]
+    assert "all genes" in trace_names
+    assert "y = x" in trace_names
+    assert "Galanin signaling" in trace_names
+    assert "Custom highlights" in trace_names
+
+
+def test_cross_contrast_scatter_intersects_gene_sets():
+    """Genes present in only one contrast must be dropped."""
+    a, b = _fake_two_contrast_tables()
+    # Drop 10 genes from b so the intersection is 90.
+    b2 = b.iloc[10:]
+    fig = fig_mod.cross_contrast_scatter(
+        a, b2,
+        label_a="A", label_b="B", title="t",
+    )
+    bg_trace = next(t for t in fig.data if t.name == "all genes")
+    # 90 shared genes minus 0 highlights => 90 background points.
+    assert len(bg_trace.x) == 90
+
+
+def test_cross_contrast_scatter_axes_locked_and_square():
+    a, b = _fake_two_contrast_tables()
+    fig = fig_mod.cross_contrast_scatter(
+        a, b, label_a="A", label_b="B", title="t",
+    )
+    # Both axes should have the same range, and the y-axis should
+    # anchor its scale to x so the diagonal is 45°.
+    x_range = tuple(fig.layout.xaxis.range)
+    y_range = tuple(fig.layout.yaxis.range)
+    assert x_range == y_range
+    assert fig.layout.yaxis.scaleanchor == "x"
+    assert fig.layout.yaxis.scaleratio == 1
+
+
+def test_cross_contrast_scatter_diagonal_spans_axis_range():
+    a, b = _fake_two_contrast_tables()
+    fig = fig_mod.cross_contrast_scatter(
+        a, b, label_a="A", label_b="B", title="t",
+    )
+    diag = next(t for t in fig.data if t.name == "y = x")
+    # Diagonal is a 2-point line from the low to the high of the
+    # shared axis range.
+    assert len(diag.x) == 2
+    assert list(diag.x) == list(diag.y)
+    assert tuple(fig.layout.xaxis.range) == (diag.x[0], diag.x[1])
+
+
+def test_cross_contrast_scatter_highlight_labels_are_dict_values():
+    a, b = _fake_two_contrast_tables()
+    primary = {a.index[0]: "Gal", a.index[1]: "Galr1"}
+    fig = fig_mod.cross_contrast_scatter(
+        a, b, label_a="A", label_b="B", title="t",
+        highlight_primary=primary,
+    )
+    gal_trace = next(t for t in fig.data if t.name == "Galanin signaling")
+    assert list(gal_trace.text) == ["Gal", "Galr1"]
+
+
+def test_cross_contrast_scatter_empty_input_returns_placeholder():
+    fig = fig_mod.cross_contrast_scatter(
+        pd.DataFrame(), pd.DataFrame(),
+        label_a="A", label_b="B", title="t",
+    )
+    annotations = fig.layout.annotations or ()
+    assert any("Need both contrast tables" in (a.text or "") for a in annotations)
+
+
+def test_cross_contrast_scatter_empty_intersection_returns_placeholder():
+    a = pd.DataFrame(
+        {"delta_log2": [1.0, -1.0]},
+        index=["ENSMUSG_X", "ENSMUSG_Y"],
+    )
+    b = pd.DataFrame(
+        {"delta_log2": [0.5, -0.5]},
+        index=["ENSMUSG_P", "ENSMUSG_Q"],
+    )
+    fig = fig_mod.cross_contrast_scatter(
+        a, b, label_a="A", label_b="B", title="t",
+    )
+    annotations = fig.layout.annotations or ()
+    assert any("No genes in common" in (a.text or "") for a in annotations)
+
+
+# ----------------------------------------------------------------------
 # expression_heatmap
 # ----------------------------------------------------------------------
 from collections import namedtuple  # noqa: E402
