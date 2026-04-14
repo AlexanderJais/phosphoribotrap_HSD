@@ -565,8 +565,30 @@ def _add_cross_contrast_highlight(
 # ----------------------------------------------------------------------
 # Expression heatmap
 # ----------------------------------------------------------------------
+def _unique_preserve(items: Iterable) -> list:
+    """Return unique items in first-seen order. Pure-Python stand-in
+    for ``dict.fromkeys(...)`` when we want a list back. Used by
+    :func:`expression_heatmap` to derive the default group order
+    from a record list."""
+    seen: set = set()
+    out: list = []
+    for x in items:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
 def _zscore_rows(df: pd.DataFrame) -> pd.DataFrame:
     """Row-wise z-score with zero-std rows left at zero (not NaN).
+
+    Uses the sample standard deviation (``ddof=1``), matching the
+    convention used by R's ``scale()`` and scipy's default — so the
+    heatmap numbers line up with what a reviewer would reproduce in
+    R. For ``n=18`` samples the difference from ``ddof=0`` is only
+    ``sqrt(18/17) ≈ 1.029`` (physically invisible on a colour scale),
+    but matching convention means someone recomputing the z-scores in
+    R gets the same values.
 
     Rows whose std is zero (a gene expressed identically across every
     sample) would otherwise produce NaN, which plotly renders as
@@ -574,7 +596,7 @@ def _zscore_rows(df: pd.DataFrame) -> pd.DataFrame:
     they render as a neutral stripe.
     """
     mean = df.mean(axis=1)
-    std = df.std(axis=1, ddof=0)
+    std = df.std(axis=1, ddof=1)
     # Avoid division by zero; zero-std rows stay at zero.
     std_safe = std.replace(0, np.nan)
     z = df.sub(mean, axis=0).div(std_safe, axis=0)
@@ -830,18 +852,6 @@ def expression_heatmap(
         annotations=annotations,
     )
     return fig
-
-
-def _unique_preserve(items: Iterable) -> list:
-    """Return unique items in first-seen order. Pure-Python stand-in
-    for ``dict.fromkeys(...)`` when we want a list back."""
-    seen: set = set()
-    out: list = []
-    for x in items:
-        if x not in seen:
-            seen.add(x)
-            out.append(x)
-    return out
 
 
 # ----------------------------------------------------------------------

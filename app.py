@@ -1289,6 +1289,16 @@ with tabs[5]:
             _symbol_map = {}
             st.error(f"Could not read tx2gene: {exc}")
 
+        # LOW #7: when the symbol map is empty (2-column tx2gene — no
+        # gene_name column), a previous version emitted TWO warnings
+        # stacked: one for the 2-column format and a second one from
+        # resolve_symbols(GALANIN_GENES, {}) saying "Galanin genes not
+        # found in tx2gene: Gal, Galp, Galr1, Galr2, Galr3". The second
+        # warning was technically correct but redundant and alarming.
+        # Now: when the symbol map is empty, emit ONE targeted warning
+        # and short-circuit the resolution to empty dicts — the per-
+        # panel empty-set guards below handle the rendering without
+        # raising.
         if not _symbol_map:
             st.warning(
                 "tx2gene TSV has no gene-symbol column (2-column "
@@ -1296,38 +1306,45 @@ with tabs[5]:
                 "3-column tx2gene with gene names — otherwise the "
                 "highlight fields can't map symbols to gene IDs."
             )
+            galanin_resolved: dict[str, str] = {}
+            galanin_missing: list[str] = []
+            custom_resolved: dict[str, str] = {}
+            custom_missing = []
+        else:
+            galanin_resolved, galanin_missing = resolve_symbols(
+                GALANIN_GENES, _symbol_map
+            )
+            custom_symbols = parse_highlight_text(custom_text)
+            custom_resolved, custom_missing = resolve_symbols(
+                custom_symbols, _symbol_map
+            )
 
-        galanin_resolved, galanin_missing = resolve_symbols(
-            GALANIN_GENES, _symbol_map
-        )
-        custom_symbols = parse_highlight_text(custom_text)
-        custom_resolved, custom_missing = resolve_symbols(
-            custom_symbols, _symbol_map
-        )
-
-        # Surface resolution status so the user sees typos immediately.
-        _resolved_cols = st.columns(2)
-        with _resolved_cols[0]:
-            if galanin_resolved:
-                st.caption(
-                    f"✅ Galanin resolved: {len(galanin_resolved)} / "
-                    f"{len(GALANIN_GENES)}"
-                )
-            if galanin_missing:
-                st.warning(
-                    "Galanin genes not found in tx2gene: "
-                    + ", ".join(galanin_missing)
-                )
-        with _resolved_cols[1]:
-            if custom_resolved:
-                st.caption(
-                    f"✅ Custom resolved: {len(custom_resolved)}"
-                )
-            if custom_missing:
-                st.warning(
-                    "Custom genes not found in tx2gene: "
-                    + ", ".join(custom_missing)
-                )
+            # Surface resolution status so the user sees typos
+            # immediately. Only rendered in the symbol-map-present
+            # path — when the map is empty we've already warned above
+            # and showing "0 / 5 resolved" would just be noise.
+            _resolved_cols = st.columns(2)
+            with _resolved_cols[0]:
+                if galanin_resolved:
+                    st.caption(
+                        f"✅ Galanin resolved: "
+                        f"{len(galanin_resolved)} / {len(GALANIN_GENES)}"
+                    )
+                if galanin_missing:
+                    st.warning(
+                        "Galanin genes not found in tx2gene: "
+                        + ", ".join(galanin_missing)
+                    )
+            with _resolved_cols[1]:
+                if custom_resolved:
+                    st.caption(
+                        f"✅ Custom resolved: {len(custom_resolved)}"
+                    )
+                if custom_missing:
+                    st.warning(
+                        "Custom genes not found in tx2gene: "
+                        + ", ".join(custom_missing)
+                    )
 
         # Merged gene set for the per-gene panels (B and C).
         all_highlighted = {**galanin_resolved, **custom_resolved}
@@ -1350,10 +1367,19 @@ with tabs[5]:
                 "mode classification table."
             )
         else:
-            contrasts_with_results = [
+            # Sort contrasts alphabetically so panel A (volcanoes) and
+            # panel E (cross-contrast scatter) have a deterministic
+            # order regardless of which contrast the user loaded first
+            # on the Analysis tab. LOW #6: the previous behaviour was
+            # dict-insertion order, which depended on click sequence —
+            # fine in practice but implicit. ``sorted()`` on the
+            # contrast name strings gives HSD1_vs_NCD before
+            # HSD3_vs_HSD1 before HSD3_vs_NCD (lexicographic), which
+            # matches the natural reading order for this design.
+            contrasts_with_results = sorted(
                 c for c, panel in _analysis.items()
                 if panel.get("contrast_result") is not None
-            ]
+            )
 
             st.divider()
 
@@ -1510,10 +1536,11 @@ with tabs[5]:
             # ----------------------------------------------------------
             st.subheader("E — Cross-contrast consistency")
             st.caption(
-                "log₂ FC from the first two contrasts on x and y. "
-                "Points near the diagonal are consistent across both "
-                "HSD durations — the most persuasive reproducibility "
-                "evidence for a chronic-stimulus n=3-per-group design."
+                "log₂ FC from the first two loaded contrasts (sorted "
+                "alphabetically) on x and y. Points near the diagonal "
+                "are consistent across both HSD durations — the most "
+                "persuasive reproducibility evidence for a chronic-"
+                "stimulus n=3-per-group design."
             )
             if len(contrasts_with_results) < 2:
                 st.info(
@@ -1521,7 +1548,15 @@ with tabs[5]:
                     "contrasts (e.g. HSD1_vs_NCD AND HSD3_vs_NCD)."
                 )
             else:
+                # contrasts_with_results is already sorted
+                # alphabetically above (LOW #6), so panel E deterministically
+                # picks the same pair every rerun. For the default
+                # 3-group design this is HSD1_vs_NCD vs HSD3_vs_HSD1 if
+                # both are loaded — or HSD1_vs_NCD vs HSD3_vs_NCD if
+                # only the two primary contrasts are loaded, which is
+                # the typical case.
                 _name_a, _name_b = contrasts_with_results[:2]
+                st.caption(f"Showing: **{_name_a}** (x) vs **{_name_b}** (y).")
                 _fig = cross_contrast_scatter(
                     _analysis[_name_a]["contrast_result"].table,
                     _analysis[_name_b]["contrast_result"].table,
