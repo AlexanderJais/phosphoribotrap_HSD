@@ -28,25 +28,34 @@ can populate the field out of the box.
 
 from __future__ import annotations
 
+import json
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-# Mouse galanin signaling core:
+from .logger import get_logger
+
+_logger = get_logger()
+
+# Mouse galanin signaling core (legacy seed set — kept for
+# backward-compat with existing tests and as a power-user quick-
+# populate option in the Figures tab). The tab no longer pre-fills
+# this list by default: users supply their own primary-highlight
+# set via a text area, optionally sourced from a GO term via
+# :func:`fetch_go_term_genes`.
 #
 # * Gal    — galanin propeptide (ligand)
 # * Galp   — galanin-like peptide (ligand)
 # * Galr1  — galanin receptor 1 (Gi/o, classical signaling)
 # * Galr2  — galanin receptor 2 (Gq + Gi/o)
 # * Galr3  — galanin receptor 3 (Gi/o)
-#
-# These are the genes we want highlighted in every Figures-tab panel
-# by default. Case-insensitive matching happens inside ``resolve_symbols``,
-# so callers can pass these as-is regardless of how the tx2gene TSV
-# capitalises the ``gene_name`` column.
 GALANIN_GENES: tuple[str, ...] = ("Gal", "Galp", "Galr1", "Galr2", "Galr3")
 
 
@@ -200,6 +209,230 @@ def resolve_symbols(
 
 
 # ----------------------------------------------------------------------
+# GO-term gene fetch (QuickGO REST)
+# ----------------------------------------------------------------------
+# Default taxon ID is mouse (NCBI 10090) because this app is a mouse
+# phosphoribotrap. The Figures tab exposes the taxon as a config so
+# users on rat / human references can override without editing code.
+GO_DEFAULT_TAXON = "10090"
+
+# QuickGO is the EBI-hosted, publicly accessible GO annotation search
+# service. We use the annotation search endpoint because it returns
+# one result per annotation (with the gene product symbol already
+# resolved) rather than requiring a second lookup pass. ``goUsage``
+# is set to ``descendants`` so GO:0007218 (neuropeptide signaling
+# pathway) pulls in its more-specific child terms as well — which
+# matches how a biologist intuitively thinks about "genes in this
+# pathway". The API is paginated; we honour ``pageInfo.total`` and
+# walk forward until we've consumed every page.
+_QUICKGO_ANNOTATION_SEARCH = (
+    "https://www.ebi.ac.uk/QuickGO/services/annotation/search"
+)
+_QUICKGO_PAGE_LIMIT = 100  # max allowed by the API
+_QUICKGO_TIMEOUT_S = 30
+_QUICKGO_USER_AGENT = "phosphoribotrap-figures/1.0"
+
+
+def _valid_go_id(go_id: str) -> bool:
+    """Structural sanity check on a user-supplied GO ID string.
+
+    Accepts ``GO:`` prefix followed by exactly seven digits (the
+    canonical GO curie format, e.g. ``GO:0007218``). Rejects empty
+    strings, whitespace, arbitrary URLs, and SQL-injection-shaped
+    inputs so we never splice unsanitised user input into an HTTPS
+    request URL.
+    """
+    if not go_id or not isinstance(go_id, str):
+        return False
+    parts = go_id.strip().split(":")
+    if len(parts) != 2 or parts[0] != "GO":
+        return False
+    return len(parts[1]) == 7 and parts[1].isdigit()
+
+
+def _default_quickgo_fetcher(url: str, timeout: float) -> dict:
+    """Default HTTP fetcher: urllib GET, JSON decode, dict return.
+
+    Isolated so tests can inject a mock fetcher and avoid hitting
+    the real QuickGO service. The fetcher contract is simple:
+    take a URL + timeout, return the parsed JSON body as a dict,
+    or raise one of ``urllib.error.URLError``, ``TimeoutError``,
+    ``json.JSONDecodeError``, or ``OSError`` on failure.
+    """
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": _QUICKGO_USER_AGENT,
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        body = resp.read()
+    return json.loads(body)
+
+
+def fetch_go_term_genes(
+    go_id: str,
+    *,
+    taxon: str = GO_DEFAULT_TAXON,
+    cache_dir: Optional[Path] = None,
+    fetcher: Optional[Callable[[str, float], dict]] = None,
+    timeout: float = _QUICKGO_TIMEOUT_S,
+    force_refresh: bool = False,
+) -> set[str]:
+    """Return the set of gene symbols annotated with a GO term.
+
+    Queries QuickGO's annotation search for ``go_id`` restricted to
+    ``taxon`` (default mouse = 10090), using ``goUsage=descendants``
+    so child terms are included. The returned set contains the
+    gene-product symbols exactly as QuickGO reports them — casing
+    matches the source annotation, which is what :func:`resolve_symbols`
+    can then translate into gene IDs via the tx2gene map.
+
+    **Caching.** When ``cache_dir`` is supplied, the fetched result
+    is written to ``<cache_dir>/go_<sanitised_id>_<taxon>.json`` with
+    a fetch timestamp. A subsequent call with the same arguments
+    reads from disk instead of hitting the network, making the
+    Figures tab responsive offline once a gene list has been
+    populated at least once. Pass ``force_refresh=True`` to bypass
+    the cache and re-query.
+
+    **Error handling.** On a network / parse failure:
+
+    1. If a cache file exists, return the cached gene set and log a
+       warning. The app stays usable on flaky networks.
+    2. Otherwise, raise ``RuntimeError`` with a user-readable message
+       so the Figures tab can surface it via ``st.error``.
+
+    ``fetcher`` lets tests inject a stub HTTP client — it defaults
+    to a urllib-based implementation that talks to QuickGO directly.
+
+    Raises ``ValueError`` for malformed ``go_id`` strings (anything
+    that isn't the canonical ``GO:dddddd`` curie) so callers can
+    short-circuit before opening any connections.
+    """
+    if not _valid_go_id(go_id):
+        raise ValueError(
+            f"Not a valid GO ID: {go_id!r}. Expected format 'GO:dddddddd' "
+            f"(e.g. 'GO:0007218' for neuropeptide signaling pathway)."
+        )
+    taxon = str(taxon).strip()
+    if not taxon.isdigit():
+        raise ValueError(
+            f"Not a valid NCBI taxon ID: {taxon!r}. Expected a digit string "
+            f"(e.g. '10090' for mouse, '10116' for rat, '9606' for human)."
+        )
+
+    cache_path: Optional[Path] = None
+    if cache_dir is not None:
+        cache_dir = Path(cache_dir)
+        # Sanitise: GO:0007218 -> GO_0007218 (no colons in filenames).
+        cache_path = cache_dir / f"go_{go_id.replace(':', '_')}_{taxon}.json"
+        if cache_path.exists() and not force_refresh:
+            try:
+                payload = json.loads(cache_path.read_text())
+                cached_symbols = payload.get("symbols")
+                if isinstance(cached_symbols, list):
+                    return {str(s) for s in cached_symbols if s}
+            except (OSError, json.JSONDecodeError) as exc:
+                _logger.warning(
+                    "GO cache read failed for %s: %s — refetching",
+                    cache_path, exc,
+                )
+
+    http_fetcher = fetcher or _default_quickgo_fetcher
+
+    # Walk the QuickGO pagination until we've consumed every page.
+    # ``numberOfHits`` is typically equal to ``pageInfo.total *
+    # resultsPerPage`` (approximately), so we trust ``pageInfo.total``
+    # as the loop bound with a hard cap of 100 pages to protect
+    # against a runaway response in the unlikely event the API
+    # misreports pagination metadata.
+    symbols: set[str] = set()
+    page = 1
+    max_pages = 100
+    try:
+        while page <= max_pages:
+            query = urllib.parse.urlencode(
+                [
+                    ("goId", go_id),
+                    ("taxonId", taxon),
+                    ("goUsage", "descendants"),
+                    ("limit", str(_QUICKGO_PAGE_LIMIT)),
+                    ("page", str(page)),
+                ]
+            )
+            url = f"{_QUICKGO_ANNOTATION_SEARCH}?{query}"
+            _logger.info("GO fetch: %s", url)
+            payload = http_fetcher(url, timeout)
+            results = payload.get("results") if isinstance(payload, dict) else None
+            if not isinstance(results, list):
+                break
+            for row in results:
+                if not isinstance(row, dict):
+                    continue
+                sym = row.get("symbol") or row.get("geneProductSymbol")
+                if sym:
+                    symbols.add(str(sym))
+            page_info = payload.get("pageInfo") if isinstance(payload, dict) else None
+            total_pages = 1
+            if isinstance(page_info, dict):
+                total_pages = int(page_info.get("total") or 1)
+            if page >= total_pages:
+                break
+            page += 1
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        OSError,
+        json.JSONDecodeError,
+        ValueError,
+    ) as exc:
+        # Graceful degradation: if we have an old cache, return that
+        # rather than failing outright. Otherwise raise a friendly
+        # RuntimeError the Figures tab can display.
+        _logger.warning(
+            "GO fetch failed for %s (taxon %s): %s", go_id, taxon, exc
+        )
+        if cache_path is not None and cache_path.exists():
+            try:
+                payload = json.loads(cache_path.read_text())
+                cached_symbols = payload.get("symbols") or []
+                _logger.info(
+                    "GO fetch: falling back to cached %s (%d symbols)",
+                    cache_path, len(cached_symbols),
+                )
+                return {str(s) for s in cached_symbols if s}
+            except (OSError, json.JSONDecodeError):
+                pass
+        raise RuntimeError(
+            f"Could not fetch GO term {go_id} from QuickGO "
+            f"(taxon {taxon}): {exc}. Check your network connection, "
+            f"or paste the gene list manually into the volcano filter "
+            f"text area."
+        ) from exc
+
+    if cache_path is not None:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "go_id": go_id,
+                        "taxon": taxon,
+                        "fetched_at": time.time(),
+                        "symbols": sorted(symbols),
+                    },
+                    indent=2,
+                )
+            )
+        except OSError as exc:
+            _logger.warning("GO cache write failed for %s: %s", cache_path, exc)
+
+    return symbols
+
+
+# ----------------------------------------------------------------------
 # anota2seq regulatory mode classification table
 # ----------------------------------------------------------------------
 # anota2seq writes one TSV per regulatory mode (translation, buffering,
@@ -333,6 +566,8 @@ def cross_contrast_scatter(
     font_size: int = DEFAULT_FONT_SIZE,
     primary_color: str = COLOR_GALANIN,
     secondary_color: str = COLOR_CUSTOM,
+    primary_label: str = "Galanin signaling",
+    secondary_label: str = "Custom highlights",
 ) -> go.Figure:
     """Scatter of ``delta_log2`` in contrast A vs contrast B, per gene.
 
@@ -467,7 +702,7 @@ def cross_contrast_scatter(
         joined=joined,
         highlight=highlight_primary,
         color=primary_color,
-        name="Galanin signaling",
+        name=primary_label,
         label_a=label_a,
         label_b=label_b,
     )
@@ -477,7 +712,7 @@ def cross_contrast_scatter(
         joined=joined,
         highlight=highlight_secondary,
         color=secondary_color,
-        name="Custom highlights",
+        name=secondary_label,
         label_a=label_a,
         label_b=label_b,
     )
@@ -1125,6 +1360,8 @@ def volcano_plot(
     font_size: int = DEFAULT_FONT_SIZE,
     primary_color: str = COLOR_GALANIN,
     secondary_color: str = COLOR_CUSTOM,
+    primary_label: str = "Galanin signaling",
+    secondary_label: str = "Custom highlights",
 ) -> go.Figure:
     """Build a Nature-grade volcano plot with an explicit highlight layer.
 
@@ -1264,24 +1501,24 @@ def volcano_plot(
         )
     )
 
-    # Layer 3: primary highlights (galanin).
+    # Layer 3: primary highlights.
     _add_highlight_trace(
         fig,
         df=df,
         highlight=highlight_primary,
         color=primary_color,
-        name="Galanin signaling",
+        name=primary_label,
         p_col=p_col,
         delta_col=delta_col,
     )
 
-    # Layer 4: secondary highlights (custom).
+    # Layer 4: secondary highlights.
     _add_highlight_trace(
         fig,
         df=df,
         highlight=highlight_secondary,
         color=secondary_color,
-        name="Custom highlights",
+        name=secondary_label,
         p_col=p_col,
         delta_col=delta_col,
     )

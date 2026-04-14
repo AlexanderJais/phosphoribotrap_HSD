@@ -73,10 +73,16 @@ REQUIRED_KEYS = (
     "ref_threads",
     "ref_force",
     # Figures tab — added alongside the tab itself.
+    "widget_fig_primary_highlights",
     "widget_fig_custom_highlights",
     "widget_fig_font_size",
     "widget_fig_alpha",
     "widget_fig_heatmap_norm",
+    # Volcano background filter (GO-term curated gene set).
+    "widget_fig_volcano_filter_enabled",
+    "widget_fig_volcano_filter_text",
+    "widget_fig_volcano_go_id",
+    "widget_fig_volcano_go_taxon",
 )
 
 

@@ -37,6 +37,8 @@ from phosphotrap.figures import (
     GALANIN_GENES,
     cross_contrast_scatter,
     expression_heatmap,
+    GO_DEFAULT_TAXON,
+    fetch_go_term_genes,
     figure_export_bytes,
     load_gene_symbol_map,
     parse_highlight_text,
@@ -1248,12 +1250,16 @@ with tabs[4]:
 # FIGURES TAB
 # ======================================================================
 with tabs[5]:
-    st.header("Figures — Nature-grade galanin signaling panels")
+    st.header("Figures — publication-ready panels")
     st.caption(
         "Publication-ready figures built from the current Analysis-tab "
-        "state. Galanin core is highlighted by default; add your own "
-        "genes to the text area below. Every panel renders as an "
-        "interactive plotly chart with SVG / PNG / HTML download buttons."
+        "state. Supply your own gene sets below — the old hardcoded "
+        "galanin core (Gal, Galp, Galr1-3) is no longer auto-populated "
+        "so any neuropeptide, receptor, or custom panel is a text-area "
+        "away. The volcano tab can also be pre-filtered to a GO term "
+        "(e.g. GO:0007218 neuropeptide signaling pathway) to strip out "
+        "highly regulated inflammatory drivers and focus the plot on "
+        "the pathway of interest."
     )
 
     # ------------------------------------------------------------------
@@ -1261,28 +1267,61 @@ with tabs[5]:
     # ------------------------------------------------------------------
     # Explicit widget keys so other tabs could programmatically seed
     # values in future (same pattern as the Config tab — see d3b838f
-    # and the REQUIRED_KEYS list in tests/test_app_widget_keys.py
-    # once this tab's keys are added there too in chunk 8).
+    # and the REQUIRED_KEYS list in tests/test_app_widget_keys.py).
+    st.session_state.setdefault("widget_fig_primary_highlights", "")
     st.session_state.setdefault("widget_fig_custom_highlights", "")
     st.session_state.setdefault(
         "widget_fig_font_size", FIG_DEFAULT_FONT_SIZE
     )
     st.session_state.setdefault("widget_fig_alpha", 0.1)
     st.session_state.setdefault("widget_fig_heatmap_norm", "zscore")
+    # Volcano GO filter state. The filter is disabled by default so
+    # existing users see the same volcano they had before this change.
+    st.session_state.setdefault("widget_fig_volcano_filter_text", "")
+    st.session_state.setdefault("widget_fig_volcano_go_id", "GO:0007218")
+    st.session_state.setdefault(
+        "widget_fig_volcano_go_taxon", GO_DEFAULT_TAXON
+    )
+    st.session_state.setdefault("widget_fig_volcano_filter_enabled", False)
 
     cc1, cc2 = st.columns(2)
     with cc1:
-        st.markdown("**Galanin core** (always highlighted):")
-        st.code(", ".join(GALANIN_GENES), language="text")
         st.text_area(
-            "Additional highlight genes "
+            "Primary highlight genes "
             "(comma, whitespace, or newline separated)",
+            key="widget_fig_primary_highlights",
+            height=80,
+            help=(
+                "These appear in crimson on the volcano / cross-"
+                "contrast panels and drive the per-gene strip plot "
+                "(panel B), heatmap (panel C), and regmode table "
+                "(panel D). Case-insensitive match against the "
+                "``gene_name`` column of your tx2gene.tsv. Leave "
+                "blank to disable the primary highlight layer."
+            ),
+        )
+        if st.button(
+            "Fill with galanin core (Gal, Galp, Galr1-3)",
+            help=(
+                "Quick-populate the primary highlights with the "
+                "legacy galanin signaling set. You can edit the "
+                "field afterwards to add / remove genes."
+            ),
+            key="fig_fill_galanin_btn",
+        ):
+            st.session_state["widget_fig_primary_highlights"] = (
+                ", ".join(GALANIN_GENES)
+            )
+            st.rerun()
+        st.text_area(
+            "Additional highlight genes (secondary, blue)",
             key="widget_fig_custom_highlights",
             height=80,
             help=(
-                "Any gene symbol in your tx2gene.tsv. Case-insensitive. "
-                "Try e.g. 'Bdnf, Npy, Pomc' to overlay a neuropeptide "
-                "control set on the galanin panels."
+                "Overlay a second gene set on the same plots. "
+                "Typical use: primary = your pathway of interest, "
+                "secondary = positive-control neuropeptides like "
+                "Bdnf, Npy, Pomc."
             ),
         )
     with cc2:
@@ -1316,10 +1355,125 @@ with tabs[5]:
             ),
         )
 
+    # ------------------------------------------------------------------
+    # Volcano GO filter
+    # ------------------------------------------------------------------
+    with st.expander(
+        "Volcano background filter (optional — restrict to a gene set)",
+        expanded=False,
+    ):
+        st.caption(
+            "When enabled, only genes in this list are drawn on the "
+            "volcano plots (panel A). Use this to focus the plot on a "
+            "curated pathway and suppress the highly regulated "
+            "inflammatory cloud that otherwise dominates an HSD "
+            "contrast. Gene symbols are matched against the "
+            "``gene_name`` column of your tx2gene.tsv (case-"
+            "insensitive). This filter affects panel A only; the per-"
+            "gene strip plot, heatmap, regmode table, and cross-"
+            "contrast scatter still see the full set."
+        )
+        st.checkbox(
+            "Enable volcano background filter",
+            key="widget_fig_volcano_filter_enabled",
+        )
+        gf1, gf2 = st.columns([3, 2])
+        with gf1:
+            st.text_area(
+                "Filter gene list "
+                "(comma, whitespace, or newline separated)",
+                key="widget_fig_volcano_filter_text",
+                height=140,
+                help=(
+                    "Paste gene symbols directly, or use the 'Fetch "
+                    "from GO term' button on the right to populate "
+                    "from a GO annotation."
+                ),
+            )
+        with gf2:
+            st.text_input(
+                "GO term ID",
+                key="widget_fig_volcano_go_id",
+                help=(
+                    "Canonical GO curie, e.g. GO:0007218 "
+                    "(neuropeptide signaling pathway, 109 genes / "
+                    "178 annotations at MGI)."
+                ),
+            )
+            st.text_input(
+                "NCBI taxon ID",
+                key="widget_fig_volcano_go_taxon",
+                help=(
+                    "10090 = mouse (default), 10116 = rat, "
+                    "9606 = human. Matches the species of your "
+                    "reference build."
+                ),
+            )
+            if st.button(
+                "Fetch gene list from GO term",
+                key="fig_fetch_go_btn",
+                help=(
+                    "Queries the EBI QuickGO REST API with "
+                    "goUsage=descendants, writes the result to a "
+                    "JSON cache under the report dir, and fills the "
+                    "filter text area on the left. Subsequent "
+                    "fetches hit the cache — click again after "
+                    "editing the GO ID to refresh."
+                ),
+            ):
+                _go_id = st.session_state["widget_fig_volcano_go_id"].strip()
+                _go_taxon = (
+                    st.session_state["widget_fig_volcano_go_taxon"].strip()
+                )
+                _go_cache_dir = cfg.effective_report_dir() / "go_cache"
+                try:
+                    with st.spinner(
+                        f"Fetching {_go_id} (taxon {_go_taxon}) from QuickGO…"
+                    ):
+                        _fetched = fetch_go_term_genes(
+                            _go_id,
+                            taxon=_go_taxon,
+                            cache_dir=_go_cache_dir,
+                            force_refresh=True,
+                        )
+                    if _fetched:
+                        # Join on newlines so the user can see and
+                        # edit the list comfortably in the text area.
+                        st.session_state[
+                            "widget_fig_volcano_filter_text"
+                        ] = "\n".join(sorted(_fetched))
+                        st.session_state[
+                            "widget_fig_volcano_filter_enabled"
+                        ] = True
+                        st.success(
+                            f"Fetched {len(_fetched)} gene symbol(s) "
+                            f"for {_go_id} and enabled the filter."
+                        )
+                        st.rerun()
+                    else:
+                        st.warning(
+                            f"QuickGO returned no gene symbols for "
+                            f"{_go_id} (taxon {_go_taxon}). Double-"
+                            f"check the ID and taxon — GO:0007218 at "
+                            f"taxon 10090 has ~109 mouse genes."
+                        )
+                except ValueError as _exc:
+                    st.error(str(_exc))
+                except RuntimeError as _exc:
+                    st.error(str(_exc))
+                except Exception as _exc:  # pragma: no cover - defensive
+                    logger.exception("GO fetch crashed")
+                    st.error(f"GO fetch failed unexpectedly: {_exc}")
+
     font_size = int(st.session_state["widget_fig_font_size"])
     alpha = float(st.session_state["widget_fig_alpha"])
     heatmap_norm = str(st.session_state["widget_fig_heatmap_norm"])
+    primary_text = st.session_state["widget_fig_primary_highlights"]
     custom_text = st.session_state["widget_fig_custom_highlights"]
+    volcano_filter_enabled = bool(
+        st.session_state["widget_fig_volcano_filter_enabled"]
+    )
+    volcano_filter_text = st.session_state["widget_fig_volcano_filter_text"]
 
     # ------------------------------------------------------------------
     # Gene resolution via tx2gene
@@ -1350,16 +1504,11 @@ with tabs[5]:
             _symbol_map = {}
             st.error(f"Could not read tx2gene: {exc}")
 
-        # LOW #7: when the symbol map is empty (2-column tx2gene — no
-        # gene_name column), a previous version emitted TWO warnings
-        # stacked: one for the 2-column format and a second one from
-        # resolve_symbols(GALANIN_GENES, {}) saying "Galanin genes not
-        # found in tx2gene: Gal, Galp, Galr1, Galr2, Galr3". The second
-        # warning was technically correct but redundant and alarming.
-        # Now: when the symbol map is empty, emit ONE targeted warning
-        # and short-circuit the resolution to empty dicts — the per-
-        # panel empty-set guards below handle the rendering without
-        # raising.
+        # When the symbol map is empty (2-column tx2gene — no
+        # gene_name column), skip gene resolution entirely and fall
+        # back to empty dicts. The per-panel empty-set guards below
+        # handle the rendering without raising. One warning, not
+        # several stacked.
         if not _symbol_map:
             st.warning(
                 "tx2gene TSV has no gene-symbol column (2-column "
@@ -1367,49 +1516,83 @@ with tabs[5]:
                 "3-column tx2gene with gene names — otherwise the "
                 "highlight fields can't map symbols to gene IDs."
             )
-            galanin_resolved: dict[str, str] = {}
-            galanin_missing: list[str] = []
+            primary_resolved: dict[str, str] = {}
+            primary_missing: list[str] = []
             custom_resolved: dict[str, str] = {}
             custom_missing = []
+            volcano_filter_ids: set[str] = set()
+            volcano_filter_missing: list[str] = []
         else:
-            galanin_resolved, galanin_missing = resolve_symbols(
-                GALANIN_GENES, _symbol_map
+            primary_symbols = parse_highlight_text(primary_text)
+            primary_resolved, primary_missing = resolve_symbols(
+                primary_symbols, _symbol_map
             )
             custom_symbols = parse_highlight_text(custom_text)
             custom_resolved, custom_missing = resolve_symbols(
                 custom_symbols, _symbol_map
             )
 
+            # Resolve the volcano background filter (if enabled) the
+            # same way — symbols → gene_ids via tx2gene. Any symbol
+            # that doesn't appear in the map is surfaced as a warning
+            # so the user can spot stale annotations vs. a release
+            # mismatch between QuickGO and the local reference.
+            if volcano_filter_enabled and volcano_filter_text.strip():
+                _volc_symbols = parse_highlight_text(volcano_filter_text)
+                _volc_resolved, volcano_filter_missing = resolve_symbols(
+                    _volc_symbols, _symbol_map
+                )
+                volcano_filter_ids = set(_volc_resolved.keys())
+            else:
+                volcano_filter_ids = set()
+                volcano_filter_missing = []
+
             # Surface resolution status so the user sees typos
-            # immediately. Only rendered in the symbol-map-present
-            # path — when the map is empty we've already warned above
-            # and showing "0 / 5 resolved" would just be noise.
-            _resolved_cols = st.columns(2)
+            # immediately. Only rendered when the symbol map is present.
+            _resolved_cols = st.columns(3)
             with _resolved_cols[0]:
-                if galanin_resolved:
+                if primary_resolved:
                     st.caption(
-                        f"✅ Galanin resolved: "
-                        f"{len(galanin_resolved)} / {len(GALANIN_GENES)}"
+                        f"✅ Primary resolved: {len(primary_resolved)}"
                     )
-                if galanin_missing:
+                if primary_missing:
                     st.warning(
-                        "Galanin genes not found in tx2gene: "
-                        + ", ".join(galanin_missing)
+                        "Primary genes not found in tx2gene: "
+                        + ", ".join(primary_missing)
                     )
             with _resolved_cols[1]:
                 if custom_resolved:
                     st.caption(
-                        f"✅ Custom resolved: {len(custom_resolved)}"
+                        f"✅ Secondary resolved: {len(custom_resolved)}"
                     )
                 if custom_missing:
                     st.warning(
-                        "Custom genes not found in tx2gene: "
+                        "Secondary genes not found in tx2gene: "
                         + ", ".join(custom_missing)
                     )
+            with _resolved_cols[2]:
+                if volcano_filter_enabled and volcano_filter_ids:
+                    st.caption(
+                        f"✅ Volcano filter: "
+                        f"{len(volcano_filter_ids)} gene(s) in tx2gene"
+                    )
+                if volcano_filter_enabled and volcano_filter_missing:
+                    _shown = volcano_filter_missing[:15]
+                    _extra = (
+                        f" (+{len(volcano_filter_missing) - 15} more)"
+                        if len(volcano_filter_missing) > 15 else ""
+                    )
+                    st.warning(
+                        "Volcano filter genes not in tx2gene: "
+                        + ", ".join(_shown) + _extra
+                    )
 
-        # Merged gene set for the per-gene panels (B and C).
-        all_highlighted = {**galanin_resolved, **custom_resolved}
-        primary_ids = set(galanin_resolved.keys())
+        # Merged gene set for the per-gene panels (B, C, D, E).
+        # Primary + secondary are both "highlighted" — the primary set
+        # is the one that gets the crimson colour + special legend
+        # label, the secondary set gets the calm blue overlay.
+        all_highlighted = {**primary_resolved, **custom_resolved}
+        primary_ids = set(primary_resolved.keys())
 
         # --------------------------------------------------------------
         # Data-readiness check — need at least the salmon matrices and
@@ -1451,9 +1634,23 @@ with tabs[5]:
             st.caption(
                 "x: delta log₂(IP/Input) (alt − ref). "
                 "y: −log₁₀(Mann-Whitney p). "
-                "Crimson = galanin core, blue = custom highlights. "
-                "Dashed horizontal line marks the padj threshold."
+                "Crimson = primary highlights, blue = secondary "
+                "highlights. Dashed horizontal line marks the padj "
+                "threshold."
             )
+            if volcano_filter_enabled and volcano_filter_ids:
+                st.caption(
+                    f"🔍 Background filter active: showing only "
+                    f"{len(volcano_filter_ids)} gene(s) present in "
+                    f"both tx2gene and the loaded contrast tables."
+                )
+            elif volcano_filter_enabled and not volcano_filter_ids:
+                st.warning(
+                    "Volcano background filter is enabled but the "
+                    "resolved gene set is empty — falling back to "
+                    "plotting all genes. Check the filter text area "
+                    "and resolution status above."
+                )
             st.info(
                 "**The staircase on the y-axis is real, not a bug.** "
                 "At n=3 vs n=3 the two-sided Mann-Whitney U statistic "
@@ -1486,13 +1683,43 @@ with tabs[5]:
             else:
                 for _contrast_name in contrasts_with_results:
                     _cr = _analysis[_contrast_name]["contrast_result"]
+                    _volc_table = _cr.table
+                    # Apply the GO / user-supplied filter, keeping
+                    # any highlighted genes even if they fall outside
+                    # the filter (otherwise a user who curated a
+                    # highlight list would see their genes disappear
+                    # from the plot silently).
+                    if volcano_filter_enabled and volcano_filter_ids:
+                        _keep = (
+                            volcano_filter_ids
+                            | set(primary_resolved.keys())
+                            | set(custom_resolved.keys())
+                        )
+                        _volc_table = _volc_table.loc[
+                            _volc_table.index.intersection(_keep)
+                        ]
+                        if _volc_table.empty:
+                            st.info(
+                                f"No genes from the filter set "
+                                f"(or highlights) are present in "
+                                f"the {_contrast_name} contrast "
+                                f"table — nothing to plot for this "
+                                f"contrast."
+                            )
+                            continue
+                    _primary_label = (
+                        "Primary highlights"
+                        if primary_resolved else "Galanin signaling"
+                    )
                     _fig = volcano_plot(
-                        _cr.table,
+                        _volc_table,
                         title=f"Volcano — {_contrast_name}",
                         alpha=alpha,
-                        highlight_primary=galanin_resolved,
+                        highlight_primary=primary_resolved,
                         highlight_secondary=custom_resolved,
                         font_size=font_size,
+                        primary_label=_primary_label,
+                        secondary_label="Secondary highlights",
                     )
                     st.plotly_chart(_fig, use_container_width=True)
                     _figure_download_row(
@@ -1523,15 +1750,16 @@ with tabs[5]:
                 )
             elif not all_highlighted:
                 st.info(
-                    "No resolved highlight genes. Check the galanin "
-                    "resolution status above — if galanin genes aren't "
-                    "in your tx2gene, rebuild from the Reference tab."
+                    "No resolved highlight genes. Type symbols into "
+                    "the Primary / Secondary highlight fields at the "
+                    "top of this tab, or click **Fill with galanin "
+                    "core** for the legacy default."
                 )
             else:
                 _fig = per_gene_strip(
                     _any_ratios.ratios,
                     _any_ratios.pair_labels,
-                    title="Galanin signaling — log₂(IP/Input)",
+                    title="Highlighted genes — log₂(IP/Input)",
                     gene_labels=all_highlighted,
                     primary_ids=primary_ids,
                     font_size=font_size,
@@ -1561,7 +1789,7 @@ with tabs[5]:
                 _fig = expression_heatmap(
                     _matrices["fpkm"],
                     _matrices["records"],
-                    title="Galanin signaling expression",
+                    title="Highlighted gene expression",
                     gene_labels=all_highlighted,
                     font_size=font_size,
                     normalize=heatmap_norm,
@@ -1608,7 +1836,7 @@ with tabs[5]:
                 st.download_button(
                     "Download regmode table (TSV)",
                     data=_regmode_df.to_csv(sep="\t", index=False),
-                    file_name="galanin_regmode.tsv",
+                    file_name="highlighted_regmode.tsv",
                     mime="text/tab-separated-values",
                     key="fig_regmode_tsv_dl",
                 )
@@ -1641,15 +1869,21 @@ with tabs[5]:
                 # the typical case.
                 _name_a, _name_b = contrasts_with_results[:2]
                 st.caption(f"Showing: **{_name_a}** (x) vs **{_name_b}** (y).")
+                _cc_primary_label = (
+                    "Primary highlights"
+                    if primary_resolved else "Galanin signaling"
+                )
                 _fig = cross_contrast_scatter(
                     _analysis[_name_a]["contrast_result"].table,
                     _analysis[_name_b]["contrast_result"].table,
                     label_a=_name_a,
                     label_b=_name_b,
                     title=f"{_name_a}  vs  {_name_b}",
-                    highlight_primary=galanin_resolved,
+                    highlight_primary=primary_resolved,
                     highlight_secondary=custom_resolved,
                     font_size=font_size,
+                    primary_label=_cc_primary_label,
+                    secondary_label="Secondary highlights",
                 )
                 st.plotly_chart(_fig, use_container_width=True)
                 _figure_download_row(_fig, "cross_contrast")

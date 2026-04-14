@@ -7,6 +7,8 @@ added, to keep each commit individually reviewable.
 
 from __future__ import annotations
 
+import json
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -150,6 +152,216 @@ def test_resolve_symbols_skips_blank_and_none_inputs():
     )
     assert resolved == {"ENSMUSG_GAL": "Gal"}
     assert missing == []
+
+
+def test_fetch_go_term_genes_rejects_invalid_go_id():
+    """``fetch_go_term_genes`` must refuse anything that isn't the
+    canonical ``GO:dddddddd`` curie before opening a connection.
+    Protects against splicing arbitrary user input into the request
+    URL (prompt-injection / SSRF concerns) and against the common
+    typo of pasting a full jax.org URL into the GO field.
+    """
+    for bad in [
+        "",
+        "GO",
+        "GO:",
+        "GO:123",
+        "GO:12345678",        # nine digits, one too many
+        "GO:abcdefg",
+        "https://www.informatics.jax.org/go/term/GO:0007218",
+        "0007218",
+    ]:
+        with pytest.raises(ValueError, match="Not a valid GO ID"):
+            fig_mod.fetch_go_term_genes(
+                bad, fetcher=lambda url, timeout: {"results": []}
+            )
+
+
+def test_fetch_go_term_genes_rejects_invalid_taxon():
+    with pytest.raises(ValueError, match="Not a valid NCBI taxon"):
+        fig_mod.fetch_go_term_genes(
+            "GO:0007218",
+            taxon="mouse",
+            fetcher=lambda url, timeout: {"results": []},
+        )
+
+
+def test_fetch_go_term_genes_single_page(tmp_path: Path):
+    """Single-page fetch: the stubbed fetcher returns one page with
+    three gene symbols and a ``pageInfo.total = 1``. The helper must
+    return exactly those symbols (de-duplicated and as a set) and
+    persist them to the cache directory for subsequent offline use.
+    """
+    captured_urls: list[str] = []
+
+    def stub(url: str, timeout: float) -> dict:
+        captured_urls.append(url)
+        return {
+            "numberOfHits": 3,
+            "pageInfo": {"current": 1, "total": 1, "resultsPerPage": 100},
+            "results": [
+                {"symbol": "Gal",   "geneProductId": "MGI:MGI:95637"},
+                {"symbol": "Galp",  "geneProductId": "MGI:MGI:1891814"},
+                {"symbol": "Galr1", "geneProductId": "MGI:MGI:1337005"},
+            ],
+        }
+
+    out = fig_mod.fetch_go_term_genes(
+        "GO:0007218",
+        taxon="10090",
+        cache_dir=tmp_path,
+        fetcher=stub,
+    )
+    assert out == {"Gal", "Galp", "Galr1"}
+    # The URL was built with the right query parameters.
+    assert len(captured_urls) == 1
+    assert "goId=GO%3A0007218" in captured_urls[0]
+    assert "taxonId=10090" in captured_urls[0]
+    assert "goUsage=descendants" in captured_urls[0]
+    # Cache file landed where we expect and carries the gene set.
+    cache_file = tmp_path / "go_GO_0007218_10090.json"
+    assert cache_file.exists()
+    payload = json.loads(cache_file.read_text())
+    assert set(payload["symbols"]) == {"Gal", "Galp", "Galr1"}
+    assert payload["go_id"] == "GO:0007218"
+    assert payload["taxon"] == "10090"
+
+
+def test_fetch_go_term_genes_walks_pages(tmp_path: Path):
+    """Multi-page fetch: stub reports ``pageInfo.total = 2`` so the
+    helper must issue two HTTP calls and union the results.
+    """
+    pages = {
+        1: {
+            "pageInfo": {"current": 1, "total": 2, "resultsPerPage": 2},
+            "results": [{"symbol": "Gal"}, {"symbol": "Galp"}],
+        },
+        2: {
+            "pageInfo": {"current": 2, "total": 2, "resultsPerPage": 2},
+            "results": [{"symbol": "Galr1"}, {"symbol": "Galr2"}],
+        },
+    }
+    calls: list[int] = []
+
+    def stub(url: str, timeout: float) -> dict:
+        # Extract the page param and return the matching page.
+        if "page=1" in url:
+            calls.append(1)
+            return pages[1]
+        if "page=2" in url:
+            calls.append(2)
+            return pages[2]
+        raise AssertionError(f"unexpected URL: {url}")
+
+    out = fig_mod.fetch_go_term_genes(
+        "GO:0007218", cache_dir=tmp_path, fetcher=stub
+    )
+    assert out == {"Gal", "Galp", "Galr1", "Galr2"}
+    assert calls == [1, 2]
+
+
+def test_fetch_go_term_genes_uses_disk_cache_on_second_call(tmp_path: Path):
+    """Second call with the same arguments must read from cache and
+    skip the fetcher entirely — that's the whole point of the disk
+    cache, the network is only hit once per GO ID per taxon.
+    """
+    def stub(url: str, timeout: float) -> dict:
+        return {
+            "pageInfo": {"current": 1, "total": 1},
+            "results": [{"symbol": "Gal"}],
+        }
+
+    # First call populates the cache.
+    first = fig_mod.fetch_go_term_genes(
+        "GO:0007218", cache_dir=tmp_path, fetcher=stub
+    )
+    assert first == {"Gal"}
+
+    # Second call with a fetcher that explodes — if the helper tries
+    # to hit the network, this test fails loudly.
+    def exploding(url: str, timeout: float) -> dict:
+        raise AssertionError("fetcher must not be called on cache hit")
+
+    second = fig_mod.fetch_go_term_genes(
+        "GO:0007218", cache_dir=tmp_path, fetcher=exploding
+    )
+    assert second == {"Gal"}
+
+
+def test_fetch_go_term_genes_force_refresh_bypasses_cache(tmp_path: Path):
+    """``force_refresh=True`` must skip the cache and re-hit the
+    fetcher, so users on the Figures tab can click Refresh to get
+    updated MGI curation without deleting files by hand.
+    """
+    fetch_calls: list[int] = []
+
+    def stub(url: str, timeout: float) -> dict:
+        fetch_calls.append(1)
+        return {
+            "pageInfo": {"current": 1, "total": 1},
+            "results": [{"symbol": "Gal"}],
+        }
+
+    fig_mod.fetch_go_term_genes("GO:0007218", cache_dir=tmp_path, fetcher=stub)
+    fig_mod.fetch_go_term_genes(
+        "GO:0007218", cache_dir=tmp_path, fetcher=stub, force_refresh=True
+    )
+    assert len(fetch_calls) == 2
+
+
+def test_fetch_go_term_genes_network_failure_falls_back_to_cache(tmp_path: Path):
+    """If a fresh cache exists from a previous successful call, a
+    network failure on the next call must return the cached symbols
+    with a warning instead of raising — the Figures tab needs to
+    stay usable offline once the user has fetched at least once.
+    """
+    def good(url: str, timeout: float) -> dict:
+        return {
+            "pageInfo": {"current": 1, "total": 1},
+            "results": [{"symbol": "Gal"}, {"symbol": "Galp"}],
+        }
+
+    # Populate cache.
+    fig_mod.fetch_go_term_genes("GO:0007218", cache_dir=tmp_path, fetcher=good)
+
+    def dead(url: str, timeout: float) -> dict:
+        raise urllib.error.URLError("network unreachable")
+
+    out = fig_mod.fetch_go_term_genes(
+        "GO:0007218",
+        cache_dir=tmp_path,
+        fetcher=dead,
+        force_refresh=True,  # force a refetch -> triggers the failure path
+    )
+    assert out == {"Gal", "Galp"}
+
+
+def test_fetch_go_term_genes_network_failure_no_cache_raises():
+    """With no cache available, a network failure must surface as a
+    ``RuntimeError`` with a user-readable message. The Figures tab
+    catches this and renders it via ``st.error`` so users know to
+    paste the gene list manually or check their network.
+    """
+    def dead(url: str, timeout: float) -> dict:
+        raise urllib.error.URLError("connection refused")
+
+    with pytest.raises(RuntimeError, match="Could not fetch GO term"):
+        fig_mod.fetch_go_term_genes("GO:0007218", fetcher=dead)
+
+
+def test_fetch_go_term_genes_handles_empty_results():
+    """An unknown GO ID (or a taxon with no annotations for that
+    term) returns an empty set without raising. Caller decides how
+    to surface that to the user.
+    """
+    def stub(url: str, timeout: float) -> dict:
+        return {
+            "pageInfo": {"current": 1, "total": 1},
+            "results": [],
+        }
+
+    out = fig_mod.fetch_go_term_genes("GO:0000000", fetcher=stub)
+    assert out == set()
 
 
 def test_resolve_symbols_collects_missing_in_order():
