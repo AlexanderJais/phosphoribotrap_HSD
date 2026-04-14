@@ -269,46 +269,90 @@ packages available some other way — the Analysis tab's anota2seq /
 DESeq2 buttons will fall back to a clear install hint if they're
 missing, but the primary analysis won't run.
 
-## Reference: building the salmon index + tx2gene (mouse / GRCm39)
+## Reference: building the salmon index + tx2gene (mouse / GRCm39, GENCODE M38)
 
 The pipeline doesn't ship a salmon index — `salmon_index` and
 `tx2gene_tsv` in `phosphotrap/config.py` are paths you provide. Build
-them once, store them somewhere stable (e.g. `~/refs/salmon/GRCm39/`),
-and point every project at the same directory.
+them once, store them somewhere stable (e.g. `~/refs/salmon/GRCm39_M38/`),
+and point every mouse project at the same directory. The index is
+~15 GB and reusable; you only build it once.
 
 These reads are mouse, so the reference is **GRCm39** (the current
-mouse assembly). Use a **GENCODE** release so transcript IDs match
-between the FASTA and the GTF; `--gencode` at index time strips the
+mouse assembly). Use **GENCODE** so transcript IDs match between the
+FASTA and the GTF; the `--gencode` flag at index time strips the
 version suffixes (`ENSMUST00000193812.2` → `ENSMUST00000193812`) so
-`tximport` lines up downstream.
+`tximport` lines up downstream. This guide pins to **GENCODE release
+M38** (published 2025-09-02), the current release at
+<https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M38/>.
+If a newer release exists when you read this, just bump the `REL`
+variable below — every other command stays the same.
 
-Pick the latest release listed at
-<https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/> (M38 as of
-this writing) and substitute it for `REL` below.
+### What you need from the M38 directory
+
+The release directory has 30+ files. You only need three:
+
+| File                                                | Size  | Purpose                                |
+|-----------------------------------------------------|-------|----------------------------------------|
+| `gencode.vM38.transcripts.fa.gz`                    |  72 M | transcriptome — what salmon quantifies |
+| `GRCm39.primary_assembly.genome.fa.gz`              | 739 M | genome — used as decoys only           |
+| `gencode.vM38.primary_assembly.annotation.gtf.gz`   |  36 M | GTF — used to build `tx2gene.tsv`      |
+
+Do **not** grab `pc_transcripts.fa.gz` (protein-coding only — drops
+every lncRNA / pseudogene), `chr_patch_hapl_scaff.*` (inflates the
+index with patch / haplotype scaffolds for no benefit), or
+`*.basic.annotation.*` (subset of transcripts, will mismatch the full
+transcriptome FASTA).
+
+### Step-by-step
+
+Pick a working directory with **at least 30 GB free** for the
+intermediate files. On a small-SSD MacBook, build on an external drive.
 
 ```bash
-# zsh: enable comment lines so this block pastes verbatim
+# zsh on macOS doesn't treat `#` as a comment in interactive mode by
+# default — enable it so this whole block pastes verbatim.
 setopt interactive_comments 2>/dev/null || true
 
-# 0. activate the project env (NOT "phosphoribotrap")
+# 0. activate the project env (the env is "phosphotrap", NOT
+#    "phosphoribotrap" — see the Install section above).
 conda activate phosphotrap
 
-# 1. download GENCODE mouse — pick the current release
+# 1. download the three files from GENCODE mouse M38.
+#    macOS ships curl, not wget. -L follows redirects, -O saves under
+#    the remote filename, -C - resumes a partial download if the
+#    connection drops.
 REL=M38
 BASE=https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_${REL}
 
-# macOS ships curl, not wget. -L follows redirects, -O keeps the remote name.
-curl -L -O ${BASE}/gencode.v${REL}.transcripts.fa.gz
-curl -L -O ${BASE}/GRCm39.primary_assembly.genome.fa.gz
-curl -L -O ${BASE}/gencode.v${REL}.primary_assembly.annotation.gtf.gz
+curl -L -C - -O ${BASE}/gencode.v${REL}.transcripts.fa.gz
+curl -L -C - -O ${BASE}/GRCm39.primary_assembly.genome.fa.gz
+curl -L -C - -O ${BASE}/gencode.v${REL}.primary_assembly.annotation.gtf.gz
 
-# 2. build the decoy list + concatenated reference
+# Optional: verify integrity against the release's MD5SUMS.
+curl -L -O ${BASE}/MD5SUMS
+md5sum -c MD5SUMS 2>/dev/null \
+    | grep -E "(transcripts\.fa|primary_assembly\.genome\.fa|primary_assembly\.annotation\.gtf)"
+# (macOS doesn't ship `md5sum`; use `md5 -r <file>` and eyeball-compare
+#  to the matching line in MD5SUMS, or `brew install md5sha1sum`.)
+
+# 2. build the decoy list + concatenated reference for selective
+#    alignment. The decoys file is the list of chromosome names from
+#    the genome FASTA; gentrome.fa.gz is the transcriptome with the
+#    genome appended.
 zgrep "^>" GRCm39.primary_assembly.genome.fa.gz \
     | cut -d ' ' -f1 | sed 's/>//' > decoys.txt
 cat gencode.v${REL}.transcripts.fa.gz GRCm39.primary_assembly.genome.fa.gz \
     > gentrome.fa.gz
 
-# 3. build the salmon index (~20-40 min, ~15 GB RAM)
+# Sanity check before the long step:
+ls -lh decoys.txt gentrome.fa.gz   # expect ~60 lines, ~810 MB
+head -3 decoys.txt                 # expect chr1 / chr2 / chr3
+wc -l decoys.txt                   # expect ~61 lines
+
+# 3. build the salmon index. ~20-40 minutes, ~15 GB RAM. Close Chrome.
+#    -k 31 is the standard k-mer size for ≥75 bp reads (these are 101 bp).
+#    --gencode strips the .N transcript-version suffix.
+#    -p 8 uses 8 threads; bump to match your core count.
 salmon index \
     -t gentrome.fa.gz \
     -d decoys.txt \
@@ -317,26 +361,39 @@ salmon index \
     --gencode \
     -p 8
 
-# 4. build the matching tx2gene.tsv from the same GTF
+# 4. build the matching tx2gene.tsv from the SAME GTF you used in
+#    step 1. Three columns: transcript_id, gene_id, gene_name.
+#    tximport in phosphotrap/anota2seq_runner.py expects exactly this.
 zcat gencode.v${REL}.primary_assembly.annotation.gtf.gz \
   | awk '$3=="transcript"' \
   | sed -E 's/.*transcript_id "([^"]+)".*gene_id "([^"]+)".*gene_name "([^"]+)".*/\1\t\2\t\3/' \
   > tx2gene.tsv
+
+# Sanity check:
+wc -l tx2gene.tsv          # expect ~150,000 lines for M38
+head -3 tx2gene.tsv        # three tab-separated columns
 ```
 
-After step 2, sanity-check the intermediates:
+> **macOS note.** `zcat` on macOS is GNU-incompatible and only reads
+> `.Z` files. If `zcat ... .gtf.gz` errors, use `gunzip -c` instead:
+> `gunzip -c gencode.vM38.primary_assembly.annotation.gtf.gz | awk ...`.
 
-```bash
-ls -lh decoys.txt gentrome.fa.gz   # ~60 lines, ~810 MB
-head -3 decoys.txt                 # chr1 / chr2 / chr3
-```
+### Pointing the app at the result
 
 In the Streamlit **Config** tab, set:
 
-- **Salmon index** → the absolute path of the `salmon_index_gencode_M38/`
-  **directory** (the one containing `info.json`, `pos.bin`, `seq.bin`,
-  …), not a file inside it.
+- **Salmon index** → the absolute path of the
+  `salmon_index_gencode_M38/` **directory** (the one containing
+  `info.json`, `pos.bin`, `seq.bin`, …), **not** a file inside it.
+  Salmon's `-i` argument is a directory and so is the Config field.
 - **tx2gene TSV** → the absolute path of `tx2gene.tsv`.
+
+After the build, you can delete the intermediates if disk is tight:
+`gentrome.fa.gz`, `decoys.txt`, the genome FASTA, and the
+transcriptome FASTA are all unused once the index is built. Keep the
+GTF if you might want to rebuild `tx2gene.tsv` with a different
+column layout later. The index directory itself is the only thing
+the pipeline actually reads from.
 
 ### Things that silently break this
 
@@ -351,17 +408,20 @@ In the Streamlit **Config** tab, set:
 - **`pc_transcripts.fa.gz` instead of `transcripts.fa.gz`.** The
   former is protein-coding only — using it makes salmon silently miss
   every lncRNA / pseudogene in the data. Always grab the plain
-  `gencode.v<REL>.transcripts.fa.gz`.
+  `gencode.vM38.transcripts.fa.gz`.
 - **`primary_assembly` vs `chr_patch_hapl_scaff`.** Use
   `primary_assembly` for both the genome and the GTF. The patch /
   haplotype scaffolds inflate the index for no benefit on a standard
-  RNA-seq run. (For mouse M38 the two genome FASTAs happen to be
-  identical, but the convention still matters.)
+  RNA-seq run. (For mouse M38, `GRCm39.genome.fa.gz` and
+  `GRCm39.primary_assembly.genome.fa.gz` happen to be byte-identical
+  at 739 MB, but stick to the `primary_assembly` name for consistency
+  with the GTF.)
+- **`*.basic.annotation.*` GTFs.** GENCODE's "basic" subset drops
+  alternative transcripts. If you build `tx2gene.tsv` from the basic
+  GTF but quantify against the full transcriptome FASTA, every
+  alternative transcript silently fails the tximport join.
 - **Pointing the Streamlit field at a file.** Salmon's `-i` argument
   is a directory. The Config field expects the same.
-
-The index is ~15 GB and reusable across every mouse RNA-seq project.
-You only build it once.
 
 ## Tests
 
