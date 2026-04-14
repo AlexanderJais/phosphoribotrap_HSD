@@ -464,6 +464,140 @@ def test_per_gene_strip_respects_group_order():
 
 
 # ----------------------------------------------------------------------
+# regmode_classification
+# ----------------------------------------------------------------------
+class _FakeAnotaResult:
+    """Duck-typed stand-in for Anota2seqResult.
+
+    phosphotrap.anota2seq_runner.Anota2seqResult exposes .translation,
+    .buffering, and .mrna_abundance as DataFrames with a gene_id
+    column. We don't import it here to keep the figures module
+    test-independent of the anota2seq_runner import chain.
+    """
+    def __init__(
+        self,
+        translation: list[str],
+        buffering: list[str],
+        mrna_abundance: list[str],
+    ):
+        self.translation = pd.DataFrame({"gene_id": translation})
+        self.buffering = pd.DataFrame({"gene_id": buffering})
+        self.mrna_abundance = pd.DataFrame({"gene_id": mrna_abundance})
+
+
+def test_regmode_classification_translation_hit():
+    anota = {
+        "HSD1_vs_NCD": _FakeAnotaResult(
+            translation=["ENSMUSG_GAL"],
+            buffering=[],
+            mrna_abundance=[],
+        ),
+    }
+    gene_labels = {"ENSMUSG_GAL": "Gal"}
+    df = fig_mod.regmode_classification(anota, gene_labels)
+    assert list(df.columns) == ["gene", "contrast", "mode"]
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert row["gene"] == "Gal"
+    assert row["contrast"] == "HSD1_vs_NCD"
+    assert row["mode"] == "translation"
+
+
+def test_regmode_classification_buffering_vs_mrna_vs_ns():
+    anota = {
+        "HSD1_vs_NCD": _FakeAnotaResult(
+            translation=[],
+            buffering=["ENSMUSG_GALR1"],
+            mrna_abundance=["ENSMUSG_GALR2"],
+        ),
+    }
+    gene_labels = {
+        "ENSMUSG_GALR1": "Galr1",
+        "ENSMUSG_GALR2": "Galr2",
+        "ENSMUSG_GALR3": "Galr3",  # absent from all three modes -> n.s.
+    }
+    df = fig_mod.regmode_classification(anota, gene_labels)
+    by_gene = {r["gene"]: r["mode"] for _, r in df.iterrows()}
+    assert by_gene["Galr1"] == "buffering"
+    assert by_gene["Galr2"] == "mRNA abundance"
+    assert by_gene["Galr3"] == "n.s."
+
+
+def test_regmode_classification_multiple_contrasts_one_gene():
+    anota = {
+        "HSD1_vs_NCD": _FakeAnotaResult(
+            translation=["ENSMUSG_GAL"], buffering=[], mrna_abundance=[],
+        ),
+        "HSD3_vs_NCD": _FakeAnotaResult(
+            translation=[], buffering=["ENSMUSG_GAL"], mrna_abundance=[],
+        ),
+    }
+    df = fig_mod.regmode_classification(anota, {"ENSMUSG_GAL": "Gal"})
+    assert len(df) == 2
+    modes = dict(zip(df["contrast"], df["mode"]))
+    assert modes == {
+        "HSD1_vs_NCD": "translation",
+        "HSD3_vs_NCD": "buffering",
+    }
+
+
+def test_regmode_classification_sort_order_translation_first():
+    """Translation hits float to the top of the table."""
+    anota = {
+        "HSD1_vs_NCD": _FakeAnotaResult(
+            translation=["ENSMUSG_GAL"],
+            buffering=["ENSMUSG_GALR1"],
+            mrna_abundance=["ENSMUSG_GALR2"],
+        ),
+    }
+    gene_labels = {
+        "ENSMUSG_GAL": "Gal",
+        "ENSMUSG_GALR1": "Galr1",
+        "ENSMUSG_GALR2": "Galr2",
+        "ENSMUSG_GALR3": "Galr3",  # n.s.
+    }
+    df = fig_mod.regmode_classification(anota, gene_labels)
+    # Expected mode order: translation, buffering, mRNA abundance, n.s.
+    assert list(df["mode"]) == [
+        "translation", "buffering", "mRNA abundance", "n.s.",
+    ]
+
+
+def test_regmode_classification_empty_results():
+    df = fig_mod.regmode_classification({}, {"ENSMUSG_GAL": "Gal"})
+    assert list(df.columns) == ["gene", "contrast", "mode"]
+    assert len(df) == 0
+
+
+def test_regmode_classification_none_result_is_skipped():
+    anota = {
+        "HSD1_vs_NCD": _FakeAnotaResult(
+            translation=["ENSMUSG_GAL"], buffering=[], mrna_abundance=[],
+        ),
+        "HSD3_vs_NCD": None,  # run failed, graceful degradation
+    }
+    df = fig_mod.regmode_classification(anota, {"ENSMUSG_GAL": "Gal"})
+    # Only the HSD1 row — the None result is silently skipped.
+    assert len(df) == 1
+    assert df.iloc[0]["contrast"] == "HSD1_vs_NCD"
+
+
+def test_regmode_classification_handles_missing_dataframe_columns():
+    """A result with empty DataFrames (anota2seq found nothing in any
+    mode) must not raise — every gene is "n.s."."""
+    class _EmptyResult:
+        translation = pd.DataFrame()
+        buffering = pd.DataFrame()
+        mrna_abundance = pd.DataFrame()
+
+    anota = {"HSD1_vs_NCD": _EmptyResult()}
+    df = fig_mod.regmode_classification(
+        anota, {"ENSMUSG_GAL": "Gal", "ENSMUSG_GALR1": "Galr1"}
+    )
+    assert all(df["mode"] == "n.s.")
+
+
+# ----------------------------------------------------------------------
 # cross_contrast_scatter
 # ----------------------------------------------------------------------
 def _fake_two_contrast_tables() -> tuple[pd.DataFrame, pd.DataFrame]:

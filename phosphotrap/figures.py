@@ -200,6 +200,124 @@ def resolve_symbols(
 
 
 # ----------------------------------------------------------------------
+# anota2seq regulatory mode classification table
+# ----------------------------------------------------------------------
+# anota2seq writes one TSV per regulatory mode (translation, buffering,
+# mRNA abundance). A gene can appear in at most one of those three,
+# plus an implicit "not significant" if it's in none. These constants
+# keep the mode names consistent across the helper, the tests, and the
+# Figures tab. ``_REGMODE_RANK`` determines display priority when a
+# gene somehow ended up in multiple modes (shouldn't happen with a
+# well-behaved anota2seq run but belt-and-braces if cached TSVs drift
+# out of sync).
+_REGMODE_TRANSLATION = "translation"
+_REGMODE_BUFFERING = "buffering"
+_REGMODE_MRNA = "mRNA abundance"
+_REGMODE_NS = "n.s."
+_REGMODE_RANK = {
+    _REGMODE_TRANSLATION: 0,
+    _REGMODE_BUFFERING: 1,
+    _REGMODE_MRNA: 2,
+    _REGMODE_NS: 3,
+}
+
+
+def _regmode_for_gene(
+    gene_id: str,
+    translation: pd.DataFrame,
+    buffering: pd.DataFrame,
+    mrna_abundance: pd.DataFrame,
+) -> str:
+    """Return which anota2seq mode a single gene belongs to.
+
+    Each input is one of the three per-mode TSVs written by
+    ``phosphotrap.anota2seq_runner``. They carry a ``gene_id`` column
+    identifying which genes fell into that regulatory mode for the
+    contrast being inspected. Absence from all three means "not
+    significant at the configured thresholds".
+
+    If a gene appears in multiple modes (shouldn't happen but could
+    if a stale cached TSV disagrees with a fresh one), the lowest-
+    rank mode from ``_REGMODE_RANK`` wins so translation > buffering
+    > mRNA abundance in display priority.
+    """
+    hits: list[str] = []
+    for name, df in (
+        (_REGMODE_TRANSLATION, translation),
+        (_REGMODE_BUFFERING, buffering),
+        (_REGMODE_MRNA, mrna_abundance),
+    ):
+        if df is None or df.empty or "gene_id" not in df.columns:
+            continue
+        if (df["gene_id"] == gene_id).any():
+            hits.append(name)
+    if not hits:
+        return _REGMODE_NS
+    # Lowest rank wins.
+    return min(hits, key=lambda n: _REGMODE_RANK[n])
+
+
+def regmode_classification(
+    anota_results: dict,
+    gene_labels: dict[str, str],
+) -> pd.DataFrame:
+    """Build a per-gene × per-contrast regulatory-mode table.
+
+    ``anota_results`` is ``{contrast_name: Anota2seqResult}`` — the
+    Figures tab builds this from ``st.session_state.analysis`` by
+    filtering for entries that have a successful anota2seq run.
+    ``Anota2seqResult`` is duck-typed to need only
+    ``.translation``, ``.buffering``, ``.mrna_abundance`` attributes
+    each exposing a DataFrame with a ``gene_id`` column — which is
+    exactly what :mod:`phosphotrap.anota2seq_runner` produces.
+
+    Returns a ``DataFrame`` with one row per
+    (gene_symbol × contrast) combination, columns:
+
+    * ``gene``     — display symbol (from ``gene_labels``)
+    * ``contrast`` — contrast name (e.g. ``HSD1_vs_NCD``)
+    * ``mode``     — one of "translation", "buffering",
+                     "mRNA abundance", or "n.s."
+
+    Rows are sorted so translation hits float to the top (lowest
+    ``_REGMODE_RANK``), then alphabetically by gene symbol then by
+    contrast name for stable display. The output is Streamlit-
+    friendly — callers can pass it straight to ``st.dataframe``
+    with ``hide_index=True`` for a manuscript-style table.
+
+    If ``anota_results`` is empty or none of the requested genes
+    appear anywhere, the returned DataFrame still has the three
+    columns but zero rows — simpler to render than a None check.
+    """
+    rows: list[dict] = []
+    for contrast_name, result in (anota_results or {}).items():
+        if result is None:
+            continue
+        translation = getattr(result, "translation", None)
+        buffering = getattr(result, "buffering", None)
+        mrna = getattr(result, "mrna_abundance", None)
+        for gene_id, symbol in gene_labels.items():
+            mode = _regmode_for_gene(gene_id, translation, buffering, mrna)
+            rows.append(
+                {
+                    "gene": symbol,
+                    "contrast": contrast_name,
+                    "mode": mode,
+                }
+            )
+
+    df = pd.DataFrame(rows, columns=["gene", "contrast", "mode"])
+    if df.empty:
+        return df
+    df["_rank"] = df["mode"].map(_REGMODE_RANK).fillna(999).astype(int)
+    df = df.sort_values(
+        ["_rank", "gene", "contrast"],
+        kind="stable",
+    ).drop(columns=["_rank"]).reset_index(drop=True)
+    return df
+
+
+# ----------------------------------------------------------------------
 # Cross-contrast consistency scatter
 # ----------------------------------------------------------------------
 def cross_contrast_scatter(
