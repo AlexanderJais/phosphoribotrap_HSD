@@ -22,6 +22,7 @@ or the Bioconductor packages aren't installed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shlex
 import subprocess
@@ -274,11 +275,17 @@ def run_anota2seq(
     )
     if cache_hit:
         cached = _read_cached_outputs(scratch)
-        logger.info("anota2seq cache hit for %s (spec verified)", contrast)
+        spec_hash = hashlib.sha256(fresh_spec_text.encode()).hexdigest()[:12]
+        logger.info(
+            "anota2seq cache hit for %s (spec sha256:%s)", contrast, spec_hash
+        )
         return Anota2seqResult(
             contrast=contrast,
             ok=True,
-            message=f"anota2seq cache hit for {contrast} (spec verified)",
+            message=(
+                f"anota2seq cache hit for {contrast} "
+                f"(spec verified, sha256:{spec_hash})"
+            ),
             translation=cached["translation"],
             buffering=cached["buffering"],
             mrna_abundance=cached["mrna_abundance"],

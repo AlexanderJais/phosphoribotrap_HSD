@@ -303,8 +303,14 @@ def run_pipeline(
     steps_per_sample = 2 if run_fastp_step else 1
     results: list[StepResult] = []
 
+    # Per-sample logs are co-located with the central app log under
+    # ``report_dir/logs/per-sample/`` so the Logs tab can list them
+    # via a single glob instead of scanning report_dir's root.
+    per_sample_log_dir = report_dir / "logs" / "per-sample"
+    per_sample_log_dir.mkdir(parents=True, exist_ok=True)
+
     for s_idx, rec in enumerate(records):
-        sample_log = report_dir / f"{rec.name()}.log"
+        sample_log = per_sample_log_dir / f"{rec.name()}.log"
         sample_log.parent.mkdir(parents=True, exist_ok=True)
 
         def _inner(step_idx: int, step_fraction: float, label: str) -> None:

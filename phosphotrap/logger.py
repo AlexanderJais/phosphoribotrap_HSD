@@ -197,6 +197,47 @@ def log_path(log_dir: Optional[Path] = None) -> Path:
     return directory / DEFAULT_LOG_FILE
 
 
+def list_per_sample_logs(report_dir: Path) -> list[Path]:
+    """Return the per-sample log files produced by the pipeline.
+
+    The pipeline runner writes each sample's fastp+salmon stdout to
+    ``<report_dir>/logs/per-sample/<sample>.log``. The Logs tab uses
+    this helper to populate a picker so users can read individual
+    sample traces without leaving the UI.
+    """
+    per_sample = Path(report_dir) / "logs" / "per-sample"
+    if not per_sample.exists():
+        return []
+    return sorted(per_sample.glob("*.log"))
+
+
+def read_log_file(path: Path, max_bytes: int = 2 * 1024 * 1024) -> str:
+    """Read a single log file, clamped at ``max_bytes`` from the tail.
+
+    Per-sample logs are typically small (<1 MB) but salmon can print
+    tens of thousands of lines on a verbose run. Cap the read so the
+    Streamlit UI doesn't choke on a huge file.
+    """
+    p = Path(path)
+    if not p.exists():
+        return ""
+    try:
+        size = p.stat().st_size
+        with p.open("rb") as fh:
+            if size > max_bytes:
+                fh.seek(size - max_bytes)
+                raw = fh.read()
+                # Drop the possibly-truncated first line.
+                nl = raw.find(b"\n")
+                if nl != -1:
+                    raw = raw[nl + 1:]
+            else:
+                raw = fh.read()
+    except OSError:
+        return ""
+    return raw.decode("utf-8", errors="replace")
+
+
 def tail_log(
     log_dir: Optional[Path] = None,
     max_lines: int = 500,

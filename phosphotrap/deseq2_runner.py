@@ -9,6 +9,7 @@ same graceful-degradation pattern as anota2seq.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shlex
 import subprocess
@@ -172,11 +173,17 @@ def run_deseq2_interaction(
     if cache_hit:
         try:
             table = pd.read_csv(cached_table, sep="\t")
-            logger.info("DESeq2 cache hit for %s (spec verified)", contrast)
+            spec_hash = hashlib.sha256(fresh_spec_text.encode()).hexdigest()[:12]
+            logger.info(
+                "DESeq2 cache hit for %s (spec sha256:%s)", contrast, spec_hash
+            )
             return DESeq2Result(
                 contrast=contrast,
                 ok=True,
-                message=f"DESeq2 cache hit for {contrast} (spec verified)",
+                message=(
+                    f"DESeq2 cache hit for {contrast} "
+                    f"(spec verified, sha256:{spec_hash})"
+                ),
                 table=table,
                 scratch_dir=scratch,
             )

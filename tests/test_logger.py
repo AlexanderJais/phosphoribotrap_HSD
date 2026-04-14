@@ -11,6 +11,8 @@ from phosphotrap.logger import (
     LOGGER_NAME,
     attach_file_handler,
     get_logger,
+    list_per_sample_logs,
+    read_log_file,
 )
 
 
@@ -107,3 +109,53 @@ def test_attach_file_handler_idempotent_on_same_path(
         and getattr(h, "_phosphotrap", False)
     ]
     assert len(tagged_file_handlers) == 1
+
+
+def test_list_per_sample_logs_empty_when_dir_missing(tmp_path: Path):
+    assert list_per_sample_logs(tmp_path) == []
+    assert list_per_sample_logs(tmp_path / "does_not_exist") == []
+
+
+def test_list_per_sample_logs_returns_sorted_files(tmp_path: Path):
+    per_sample = tmp_path / "logs" / "per-sample"
+    per_sample.mkdir(parents=True)
+    (per_sample / "NCD_IP1.log").write_text("a")
+    (per_sample / "HSD1_IP5.log").write_text("b")
+    (per_sample / "NCD_INPUT1.log").write_text("c")
+    # A non-log file shouldn't be included.
+    (per_sample / "notes.txt").write_text("ignored")
+
+    found = list_per_sample_logs(tmp_path)
+    names = [p.name for p in found]
+    assert names == sorted(names)
+    assert "notes.txt" not in names
+    assert "NCD_IP1.log" in names
+    assert "HSD1_IP5.log" in names
+    assert "NCD_INPUT1.log" in names
+
+
+def test_read_log_file_returns_full_content_when_small(tmp_path: Path):
+    p = tmp_path / "small.log"
+    p.write_text("hello\nworld\n")
+    assert read_log_file(p) == "hello\nworld\n"
+
+
+def test_read_log_file_truncates_large_files_to_tail(tmp_path: Path):
+    """A 2 MB tail limit must drop the front of a much larger file
+    and not raise.
+    """
+    p = tmp_path / "big.log"
+    # 3 MB of predictable content; tail should start well past the
+    # halfway mark.
+    chunk = ("x" * 99 + "\n")  # 100 chars per line incl. newline
+    p.write_text(chunk * 30_000)  # ~3 MB
+
+    content = read_log_file(p, max_bytes=2 * 1024 * 1024)
+    assert len(content.encode("utf-8")) <= 2 * 1024 * 1024
+    # The tail ends with a full line (we didn't leave a ragged
+    # partial line at the end).
+    assert content.endswith("\n")
+
+
+def test_read_log_file_missing_returns_empty(tmp_path: Path):
+    assert read_log_file(tmp_path / "nope.log") == ""

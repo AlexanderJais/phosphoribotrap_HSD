@@ -34,7 +34,13 @@ from phosphotrap.fpkm import (
     load_salmon_matrix,
     pair_ratios,
 )
-from phosphotrap.logger import attach_file_handler, get_logger, tail_log
+from phosphotrap.logger import (
+    attach_file_handler,
+    get_logger,
+    list_per_sample_logs,
+    read_log_file,
+    tail_log,
+)
 from phosphotrap.pipeline import check_environment, run_pipeline
 from phosphotrap.samples import (
     GROUPS,
@@ -74,10 +80,6 @@ if "cfg" not in st.session_state:
     st.session_state.cfg = AppConfig.load(DEFAULT_CONFIG_PATH)
 if "sample_df" not in st.session_state:
     st.session_state.sample_df = default_sample_df()
-if "progress_value" not in st.session_state:
-    st.session_state.progress_value = 0.0
-if "progress_msg" not in st.session_state:
-    st.session_state.progress_msg = ""
 if "pipeline_results" not in st.session_state:
     st.session_state.pipeline_results = []
 if "log_filter_staged_clear" not in st.session_state:
@@ -256,15 +258,33 @@ with tabs[0]:
     bcol1, bcol2 = st.columns([1, 1])
     with bcol1:
         if st.button("Save config", type="primary"):
-            path = cfg.save(DEFAULT_CONFIG_PATH)
-            st.session_state.disk_config = AppConfig.load(DEFAULT_CONFIG_PATH)
-            st.success(f"Saved {path}")
-            logger.info("config saved to %s", path)
+            try:
+                path = cfg.save(DEFAULT_CONFIG_PATH)
+                st.session_state.disk_config = AppConfig.load(DEFAULT_CONFIG_PATH)
+                st.success(f"Saved {path}")
+                logger.info("config saved to %s", path)
+            except OSError as exc:
+                # The save button used to surface a raw traceback in
+                # the Streamlit error panel on a read-only config
+                # path. Catch it and show a friendly message instead.
+                logger.exception("config save failed")
+                st.error(
+                    f"Could not save config to {DEFAULT_CONFIG_PATH}: {exc}"
+                )
     with bcol2:
         if st.button("Check environment"):
-            env = check_environment(resolve_rscript(cfg))
-            rows = [{"tool": k, **v} for k, v in env.items()]
-            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+            st.session_state.last_env_check = check_environment(
+                resolve_rscript(cfg)
+            )
+
+    # Render the last environment-check result outside the button
+    # block so it persists across reruns. The previous version only
+    # rendered inside the ``if st.button:`` guard, so any other
+    # interaction (e.g., typing in a text field) cleared the display.
+    last_env = st.session_state.get("last_env_check")
+    if last_env:
+        rows = [{"tool": k, **v} for k, v in last_env.items()]
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 # ======================================================================
 # SAMPLES TAB
@@ -349,7 +369,14 @@ with tabs[2]:
 
     dry_run = st.checkbox("Dry run (environment check only)")
 
-    progress_bar = st.progress(st.session_state.progress_value, text=st.session_state.progress_msg)
+    # Progress bar lives inside an ``st.empty()`` placeholder so it
+    # only renders while a pipeline is actually running. Previously we
+    # stored ``progress_value`` in session state and re-rendered a
+    # static 1.0-filled bar after a completed run, which looked like
+    # a pipeline was still running when the user was just switching
+    # tabs. st.empty() is recreated on every rerun — if nothing writes
+    # into it during this render, it simply draws nothing.
+    progress_container = st.empty()
     st.caption(
         "Progress is a smoothed line-count ramp from the subprocess output, "
         "not a wall-clock ETA — fastp and salmon don't emit parseable progress."
@@ -357,13 +384,16 @@ with tabs[2]:
 
     if st.button("Start pipeline", type="primary", disabled=not selected and not dry_run):
         # Auto-save current config first.
-        cfg.save(DEFAULT_CONFIG_PATH)
-        st.session_state.disk_config = AppConfig.load(DEFAULT_CONFIG_PATH)
+        try:
+            cfg.save(DEFAULT_CONFIG_PATH)
+            st.session_state.disk_config = AppConfig.load(DEFAULT_CONFIG_PATH)
+        except OSError as exc:
+            logger.warning("auto-save before pipeline start failed: %s", exc)
+
+        progress_bar = progress_container.progress(0.0, text="starting…")
 
         def cb(sample_idx: int, step_idx: int, frac: float, msg: str) -> None:
             frac = max(0.0, min(1.0, float(frac)))
-            st.session_state.progress_value = frac
-            st.session_state.progress_msg = msg
             progress_bar.progress(frac, text=msg)
 
         with st.spinner("Running pipeline..."):
@@ -664,4 +694,36 @@ with tabs[4]:
             file_name="phosphotrap.log",
             mime="text/plain",
             help="Exports the entire rolling log, stitched across backups.",
+        )
+
+    st.divider()
+    st.subheader("Per-sample logs")
+    # The pipeline runner writes each sample's fastp+salmon stdout
+    # to ``report_dir/logs/per-sample/<name>.log`` so we can surface
+    # them here alongside the central app log. Before the recent
+    # move, per-sample logs lived directly in report_dir and weren't
+    # accessible from the UI.
+    per_sample_logs = list_per_sample_logs(cfg.effective_report_dir())
+    if not per_sample_logs:
+        st.caption(
+            "No per-sample logs yet. They appear here after the Pipeline "
+            "tab runs fastp or salmon for at least one sample."
+        )
+    else:
+        labels = [p.stem for p in per_sample_logs]
+        by_label = dict(zip(labels, per_sample_logs))
+        picked = st.selectbox(
+            "Sample",
+            options=labels,
+            key="per_sample_log_picker",
+            help="Last 2 MB of the selected sample's fastp+salmon stdout.",
+        )
+        content = read_log_file(by_label[picked])
+        st.code(content or "(sample log empty)", language="text")
+        st.download_button(
+            f"Download {picked}.log",
+            data=content,
+            file_name=f"{picked}.log",
+            mime="text/plain",
+            key=f"download_sample_log_{picked}",
         )
