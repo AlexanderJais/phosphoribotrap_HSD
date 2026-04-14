@@ -8,6 +8,74 @@ associated transcripts, not 28–30 nt ribosome-protected footprints, so
 footprint-oriented tools (RiboWaltz, RiboFlow, ORFquant, RiboToolkit,
 riboSeqR) do not apply and are not part of this pipeline.
 
+## Quickstart — first run, in order
+
+If you've never run this app before, do these steps in this order. No
+shell commands beyond `conda` and `streamlit run`. The whole reference
+build, sample sheet, pipeline, and analysis live inside the app.
+
+1. **Install the conda env** (one time).
+
+   ```
+   conda env create -f environment.yml
+   conda activate phosphotrap
+   ```
+
+   The env is named **`phosphotrap`**, not `phosphoribotrap`. See the
+   Install section below for the `mamba` fast-path if conda's solver
+   hangs.
+
+2. **Start the app.**
+
+   ```
+   streamlit run app.py
+   ```
+
+   Six tabs across the top: **Config**, **Reference**, **Samples**,
+   **Pipeline**, **Analysis**, **Logs**. Work them left to right.
+
+3. **Reference tab — build the salmon index.** Leave the defaults
+   (release `M38`, destination `~/phosphotrap_refs/gencode_mouse_M38/`,
+   threads = your core count). Click **Build reference**. One progress
+   bar walks through download → decoys → gentrome → `salmon index` →
+   `tx2gene.tsv`. Takes ~30–60 minutes on a laptop with reasonable
+   wifi; ~15 GB on disk when done. Re-running over an existing
+   destination is a no-op.
+
+   When the build finishes, click **Use these paths in Config** — that
+   auto-writes `salmon_index` and `tx2gene_tsv` and saves the config.
+   You never need to touch those text fields by hand.
+
+4. **Config tab — set your fastq directory.** Type the absolute path
+   to the folder containing the 36 `*.fastq.gz` files in the
+   **Fastq directory** field, then click **Save config**. Everything
+   else on this tab has sane defaults; ignore them on the first run.
+
+5. **Samples tab — auto-populate fastq paths.** Click **Auto-populate
+   fastq paths**. The 18-row default sample sheet matches your CCG
+   IDs and lane convention; the auto-populator fills in R1/R2 paths
+   from the directory you set in step 4. The summary at the bottom
+   should say "18 / 18 samples have existing R1 + R2 fastq files" and
+   "3 matched IP/INPUT pairs" per group. If it doesn't, your fastq
+   filenames don't match the expected
+   `A006200122_<CCG>_S<n>_L002_R{1,2}_001.fastq.gz` pattern — fix the
+   filenames or edit the sample sheet directly in the data editor.
+
+6. **Pipeline tab — run fastp + salmon.** Leave all 18 samples
+   selected. Click **Start pipeline**. Each sample takes ~5–10 min on
+   a laptop. Skip-if-cached is on by default, so a crash mid-run
+   resumes from the last completed sample on the next click.
+
+7. **Analysis tab — anota2seq + Mann-Whitney.** Pick a contrast
+   (default `HSD1_vs_NCD`). Click **Load salmon quant outputs**,
+   then **Run anota2seq**, then **Compute IP/Input ratios**. Tables,
+   volcano plot, and TSV downloads appear inline. Repeat for the
+   `HSD3_vs_NCD` contrast.
+
+If anything goes wrong, the **Logs** tab tails `phosphotrap.log` with
+a substring filter, and the Pipeline tab writes per-sample
+fastp+salmon stdout to `<report_dir>/logs/per-sample/<sample>.log`.
+
 ## Experimental design
 
 - **18 paired-end libraries** sequenced on a single NovaSeq lane (run
@@ -243,6 +311,9 @@ environment.yml             # conda bootstrap (includes bioconda tools)
    renders is a no-op).
 
 ## Install
+
+For a guided first run, see [Quickstart](#quickstart--first-run-in-order)
+above — this section just covers the env setup.
 
 ### Conda (recommended — includes the Bioconda tools)
 
