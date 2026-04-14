@@ -94,7 +94,13 @@ disk_cfg: AppConfig = st.session_state.disk_config
 # Attach the file handler to the configured report dir. Idempotent, so
 # Streamlit reruns don't stack handlers; if the user changes report_dir
 # and saves, the next rerun rotates the handler onto the new location.
-attach_file_handler(Path(cfg.report_dir) / "logs")
+# attach_file_handler itself is defensive — if the requested directory
+# can't be created (PermissionError, empty string, read-only FS) it
+# falls back to DEFAULT_LOG_DIR and logs a warning rather than
+# crashing the app. Users can always navigate back to the Config tab
+# to fix a typo instead of being locked out.
+_report_dir = (cfg.report_dir or "").strip() or AppConfig().report_dir
+attach_file_handler(Path(_report_dir) / "logs")
 
 # Sample records are derived from st.session_state.sample_df and used
 # by every tab. Compute once per rerun rather than 5+ times scattered

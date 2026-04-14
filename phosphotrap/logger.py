@@ -81,10 +81,29 @@ def attach_file_handler(log_dir: Optional[Path] = None) -> Path:
     Idempotent — if a phosphotrap file handler is already attached at
     the same resolved path we return immediately. If it's attached at a
     different path we rotate it onto the new one.
+
+    If ``log_dir`` can't be created or written to (PermissionError,
+    read-only filesystem, bad path) we fall back to
+    :data:`DEFAULT_LOG_DIR`, log a warning, and return the fallback
+    path. The UI must never crash just because the user typed an
+    unwriteable directory into the Config tab — every Streamlit rerun
+    calls this function, so a raised exception would lock the user
+    out of their own app with no way back to the Config tab to fix
+    the typo.
     """
     global _active_log_dir
-    directory = Path(log_dir) if log_dir else DEFAULT_LOG_DIR
-    directory.mkdir(parents=True, exist_ok=True)
+    # Normalise: treat None, empty string, and "." as "no explicit
+    # directory" and use DEFAULT_LOG_DIR. ``Path("")`` resolves to
+    # ``Path(".")``, so a cleared Report/log directory text input
+    # would otherwise silently create ``logs/`` in the cwd where
+    # streamlit happened to be launched. ``_safe_resolve_log_dir`` is
+    # still responsible for the fallback if the requested path is
+    # non-empty but unwriteable.
+    if log_dir is None or str(log_dir).strip() in ("", "."):
+        requested: Path = DEFAULT_LOG_DIR
+    else:
+        requested = Path(log_dir)
+    directory = _safe_resolve_log_dir(requested)
     target = (directory / DEFAULT_LOG_FILE).resolve()
 
     logger = get_logger()  # ensures stream handler exists
@@ -97,14 +116,75 @@ def attach_file_handler(log_dir: Optional[Path] = None) -> Path:
             logger.removeHandler(h)
             h.close()
 
-    fh = logging.handlers.RotatingFileHandler(
-        target, maxBytes=MAX_BYTES, backupCount=BACKUP_COUNT, encoding="utf-8"
-    )
+    try:
+        fh = logging.handlers.RotatingFileHandler(
+            target, maxBytes=MAX_BYTES, backupCount=BACKUP_COUNT, encoding="utf-8"
+        )
+    except OSError as exc:
+        # Directory existed at _safe_resolve_log_dir check time but
+        # opening the log file itself failed. Fall back once more.
+        logger.warning(
+            "could not open rotating log %s (%s); file handler not attached",
+            target, exc,
+        )
+        _active_log_dir = directory
+        return target
+
     fh.setFormatter(_FORMATTER)
     fh._phosphotrap = True  # type: ignore[attr-defined]
     logger.addHandler(fh)
     _active_log_dir = directory
     return target
+
+
+def _safe_resolve_log_dir(requested: Path) -> Path:
+    """Try to create ``requested``; fall back to :data:`DEFAULT_LOG_DIR`.
+
+    Empty paths and unwriteable directories both fall back. Warnings
+    go through :func:`get_logger` (which is side-effect-free on the
+    filesystem at this point — only the stream handler is attached).
+    """
+    # ``Path("")`` resolves to ``.`` — reject that explicitly so a
+    # blank Report/log directory text input doesn't silently create
+    # ``logs/`` in whatever cwd streamlit was launched from.
+    if not str(requested).strip():
+        logger = get_logger()
+        logger.warning(
+            "empty log directory requested; falling back to %s", DEFAULT_LOG_DIR
+        )
+        return _ensure_dir_or_tmp(DEFAULT_LOG_DIR)
+
+    try:
+        requested.mkdir(parents=True, exist_ok=True)
+        return requested
+    except OSError as exc:
+        logger = get_logger()
+        logger.warning(
+            "log directory %s is unwriteable (%s); falling back to %s",
+            requested, exc, DEFAULT_LOG_DIR,
+        )
+        return _ensure_dir_or_tmp(DEFAULT_LOG_DIR)
+
+
+def _ensure_dir_or_tmp(primary: Path) -> Path:
+    """Create ``primary`` if possible; otherwise a temp dir.
+
+    Last line of defence — if even ``logs/`` in cwd can't be created
+    (very restrictive sandbox, read-only cwd), use a temp directory
+    so the stream handler at least has a valid target.
+    """
+    try:
+        primary.mkdir(parents=True, exist_ok=True)
+        return primary
+    except OSError:
+        import tempfile
+        fallback = Path(tempfile.mkdtemp(prefix="phosphotrap-logs-"))
+        logger = get_logger()
+        logger.warning(
+            "fallback log directory %s is also unwriteable; using %s",
+            primary, fallback,
+        )
+        return fallback
 
 
 def active_log_dir() -> Path:

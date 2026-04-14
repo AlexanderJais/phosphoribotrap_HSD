@@ -2,6 +2,8 @@
 logs/
 output/
 config/phosphotrap.json
+phosphotrap.log
+phosphotrap.log.*
 
 # Python
 __pycache__/
