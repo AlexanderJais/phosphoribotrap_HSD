@@ -1132,6 +1132,26 @@ def volcano_plot(
     minus-mean-ref log2 ratio); the y axis is ``-log10(p_col)`` so
     plot orientation matches every volcano a reviewer has ever seen.
 
+    **Mann-Whitney banding at small n is honest, not a bug.** With
+    the default ``p_col="mannwhitney_p"`` and a 3-vs-3 comparison
+    (the typical design for this app), the two-sided Mann-Whitney
+    U statistic has only C(6,3)=20 possible rank orderings, which
+    produces exactly five distinct p-values (≈0.10, 0.20, 0.40,
+    0.70, 1.00 — the smallest two-sided p is 2/20 = 0.10). That's
+    a property of the exact rank-sum distribution, not precision
+    loss: p-values are stored as float64 end-to-end, no rounding,
+    no permutation approximation. On ``-log10(p)`` the banding
+    shows up as a staircase of horizontal stripes, and that's what
+    the pipeline draws — we do *not* apply visual jitter, because
+    moving points off their true p-value would misrepresent the
+    statistic. If you want a continuous y-axis at small n, switch
+    to a parametric, variance-borrowed test: this app runs
+    ``anota2seq`` exactly for that purpose. Pass the anota2seq
+    translation regMode table to ``volcano_plot`` with
+    ``p_col="apvRvmP"``, ``padj_col="apvRvmPAdj"`` and
+    ``delta_col="apvEff"`` (or ``"deltaPT"``) to get a
+    volcano whose y-axis is not distribution-capped.
+
     Four trace layers, rendered bottom-to-top:
 
     1. **Background** — every gene in ``contrast_table`` with a
@@ -1149,8 +1169,9 @@ def volcano_plot(
        primary, labeled.
 
     ``contrast_table`` is expected to be indexed by ``gene_id`` (as
-    produced by :class:`phosphotrap.fpkm.ContrastResult.table`), so
-    the highlight dicts can be keyed directly by gene_id.
+    produced by :class:`phosphotrap.fpkm.ContrastResult.table` or
+    by the ``anota2seq`` runner's regMode TSVs), so the highlight
+    dicts can be keyed directly by gene_id.
 
     Missing genes in the highlight dicts (i.e. gene_ids the user
     resolved against tx2gene but which don't appear in this

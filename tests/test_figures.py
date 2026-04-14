@@ -362,6 +362,47 @@ def test_volcano_plot_handles_missing_padj_column():
     assert len(sig_traces[0].x) == 0
 
 
+def _mwu_n3_contrast_table(n: int = 300, seed: int = 0) -> pd.DataFrame:
+    """Contrast table that mimics the n=3 vs n=3 Mann-Whitney
+    banding: only 5 possible two-sided p-values. Used by the honest-
+    banding regression test below.
+    """
+    rng = np.random.default_rng(seed)
+    gene_ids = [f"ENSMUSG{str(i).zfill(11)}" for i in range(n)]
+    discrete = np.array([0.10, 0.20, 0.40, 0.70, 1.00])
+    p = discrete[rng.integers(0, 5, size=n)]
+    delta = rng.normal(0, 1, size=n)
+    return pd.DataFrame(
+        {
+            "delta_log2": delta,
+            "mannwhitney_p": p,
+            "mannwhitney_padj": np.clip(p * 2, 0, 1),
+        },
+        index=gene_ids,
+    )
+
+
+def test_volcano_preserves_discrete_mwu_bands_without_jitter():
+    """Regression pin: ``volcano_plot`` must NOT apply y-jitter to
+    the MWU n=3 p-value distribution. Moving points off their true
+    -log10(p) would misrepresent the statistic. The banding is a
+    property of the Mann-Whitney exact distribution at n=3 vs 3
+    (only C(6,3)=20 rank orderings → 5 distinct two-sided p-values)
+    and the plot surfaces that honestly. Users who need continuous
+    p at small n should switch to the anota2seq moderated RVM
+    p-value; see the docstring on ``volcano_plot``.
+    """
+    df = _mwu_n3_contrast_table()
+    fig = fig_mod.volcano_plot(df, title="honest bands")
+    bg = [t for t in fig.data if t.name == "all genes"][0]
+    # Background y-values still sit on ≤5 raw bands, not a cloud.
+    assert 1 <= len(np.unique(bg.y)) <= 5
+    # And those values match -log10 of the raw p column — no
+    # transformation besides the safe-log10.
+    raw_y = fig_mod._neg_log10(df["mannwhitney_p"])
+    assert set(np.unique(bg.y)).issubset(set(np.unique(raw_y[np.isfinite(raw_y)])))
+
+
 def test_neg_log10_handles_zero_and_negative():
     s = pd.Series([0.001, 0.0, -1, np.nan, 1.0])
     out = fig_mod._neg_log10(s)

@@ -1454,6 +1454,29 @@ with tabs[5]:
                 "Crimson = galanin core, blue = custom highlights. "
                 "Dashed horizontal line marks the padj threshold."
             )
+            st.info(
+                "**The staircase on the y-axis is real, not a bug.** "
+                "At n=3 vs n=3 the two-sided Mann-Whitney U statistic "
+                "has exactly C(6,3)=20 possible rank orderings, which "
+                "yields only five distinct p-values (≈0.10, 0.20, 0.40, "
+                "0.70, 1.00 — the smallest two-sided p is 2/20 = 0.10). "
+                "That's a property of the exact rank-sum distribution, "
+                "not precision loss or a permutation-count artefact — "
+                "p-values are stored as float64 end-to-end and nothing "
+                "is rounded before plotting. This volcano draws the "
+                "true discrete y-values; it deliberately does NOT "
+                "apply visual jitter, because moving points off their "
+                "actual p would misrepresent the statistic.\n\n"
+                "For a continuous y-axis at this sample size, use a "
+                "parametric test that borrows variance across genes. "
+                "This app already runs **anota2seq** for exactly that "
+                "purpose — the per-contrast regMode TSVs "
+                "(``<output>/anota2seq/<contrast>/translation.tsv``, "
+                "``buffering.tsv``, ``mrna_abundance.tsv``) carry a "
+                "moderated RVM p-value (``apvRvmP``) and its adjusted "
+                "form (``apvRvmPAdj``), neither of which is "
+                "distribution-capped."
+            )
             if not contrasts_with_results:
                 st.info(
                     "No contrast Mann-Whitney results yet. Run "
