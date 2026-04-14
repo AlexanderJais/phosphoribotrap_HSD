@@ -32,6 +32,18 @@ from phosphotrap.config import (
     validate_reference_paths,
 )
 from phosphotrap.deseq2_runner import run_deseq2_interaction
+from phosphotrap.figures import (
+    DEFAULT_FONT_SIZE as FIG_DEFAULT_FONT_SIZE,
+    GALANIN_GENES,
+    cross_contrast_scatter,
+    expression_heatmap,
+    load_gene_symbol_map,
+    parse_highlight_text,
+    per_gene_strip,
+    regmode_classification,
+    resolve_symbols,
+    volcano_plot,
+)
 from phosphotrap.fpkm import (
     between_group_contrast,
     load_salmon_matrix,
@@ -101,6 +113,50 @@ if "_preset_just_applied" not in st.session_state:
 cfg: AppConfig = st.session_state.cfg
 disk_cfg: AppConfig = st.session_state.disk_config
 
+
+def _figure_download_row(fig, basename: str) -> None:
+    """Render a three-button row: HTML / SVG / PNG download for a
+    plotly figure.
+
+    HTML export is the always-works fallback (pure Python, no
+    external binary). SVG and PNG both go through kaleido — which
+    isn't a required dependency, so the buttons silently degrade to
+    a caption hint if ``fig.to_image(format=...)`` raises. Callers
+    pass a unique ``basename`` (e.g. ``"volcano_HSD1_vs_NCD"``) that
+    seeds both the file names AND the Streamlit widget keys so
+    multiple download rows on the same rerun don't collide.
+    """
+    col_html, col_svg, col_png = st.columns(3)
+    with col_html:
+        st.download_button(
+            "Download HTML",
+            data=fig.to_html(full_html=True, include_plotlyjs="cdn"),
+            file_name=f"{basename}.html",
+            mime="text/html",
+            key=f"fig_dl_html_{basename}",
+        )
+    for col, fmt, mime in (
+        (col_svg, "svg", "image/svg+xml"),
+        (col_png, "png", "image/png"),
+    ):
+        with col:
+            try:
+                img_bytes = fig.to_image(format=fmt, scale=2)
+            except Exception as exc:  # pragma: no cover - UI-only
+                st.caption(
+                    f"Install `kaleido` for {fmt.upper()} export "
+                    f"(`pip install kaleido` or `mamba install -c "
+                    f"conda-forge kaleido`). Error: {exc}"
+                )
+                continue
+            st.download_button(
+                f"Download {fmt.upper()}",
+                data=img_bytes,
+                file_name=f"{basename}.{fmt}",
+                mime=mime,
+                key=f"fig_dl_{fmt}_{basename}",
+            )
+
 # Attach the file handler to the configured report dir. Idempotent, so
 # Streamlit reruns don't stack handlers; if the user changes report_dir
 # and saves, the next rerun rotates the handler onto the new location.
@@ -124,7 +180,7 @@ ready_samples = ready_records(sample_records)
 st.title("Phosphoribotrap RNA-seq — 3-group (NCD / HSD1 / HSD3)")
 
 tabs = st.tabs(
-    ["Config", "Reference", "Samples", "Pipeline", "Analysis", "Logs"]
+    ["Config", "Reference", "Samples", "Pipeline", "Analysis", "Figures", "Logs"]
 )
 
 # ======================================================================
@@ -1108,9 +1164,369 @@ with tabs[4]:
         )
 
 # ======================================================================
-# LOGS TAB
+# FIGURES TAB
 # ======================================================================
 with tabs[5]:
+    st.header("Figures — Nature-grade galanin signaling panels")
+    st.caption(
+        "Publication-ready figures built from the current Analysis-tab "
+        "state. Galanin core is highlighted by default; add your own "
+        "genes to the text area below. Every panel renders as an "
+        "interactive plotly chart with SVG / PNG / HTML download buttons."
+    )
+
+    # ------------------------------------------------------------------
+    # Controls
+    # ------------------------------------------------------------------
+    # Explicit widget keys so other tabs could programmatically seed
+    # values in future (same pattern as the Config tab — see d3b838f
+    # and the REQUIRED_KEYS list in tests/test_app_widget_keys.py
+    # once this tab's keys are added there too in chunk 8).
+    st.session_state.setdefault("widget_fig_custom_highlights", "")
+    st.session_state.setdefault(
+        "widget_fig_font_size", FIG_DEFAULT_FONT_SIZE
+    )
+    st.session_state.setdefault("widget_fig_alpha", 0.1)
+    st.session_state.setdefault("widget_fig_heatmap_norm", "zscore")
+
+    cc1, cc2 = st.columns(2)
+    with cc1:
+        st.markdown("**Galanin core** (always highlighted):")
+        st.code(", ".join(GALANIN_GENES), language="text")
+        st.text_area(
+            "Additional highlight genes "
+            "(comma, whitespace, or newline separated)",
+            key="widget_fig_custom_highlights",
+            height=80,
+            help=(
+                "Any gene symbol in your tx2gene.tsv. Case-insensitive. "
+                "Try e.g. 'Bdnf, Npy, Pomc' to overlay a neuropeptide "
+                "control set on the galanin panels."
+            ),
+        )
+    with cc2:
+        st.slider(
+            "Font size (pt)",
+            min_value=8, max_value=22, step=1,
+            key="widget_fig_font_size",
+            help=(
+                "14 is the screen default. Drop to 8 for final-print "
+                "panels; bump to 18–22 for slides and posters."
+            ),
+        )
+        st.slider(
+            "Significance threshold (padj)",
+            min_value=0.01, max_value=0.50, step=0.01,
+            key="widget_fig_alpha",
+            help=(
+                "Horizontal dashed line on the volcano. Genes with "
+                "padj ≤ this threshold are drawn in the 'significant' "
+                "colour. Chronic-stimulus preset uses 0.1."
+            ),
+        )
+        st.selectbox(
+            "Heatmap normalization",
+            options=["zscore", "log2", "raw"],
+            key="widget_fig_heatmap_norm",
+            help=(
+                "zscore (row-wise, diverging RdBu) for 'which samples "
+                "deviate from the row mean'; log2(FPKM+1) for expression "
+                "levels; raw FPKM for direct inspection."
+            ),
+        )
+
+    font_size = int(st.session_state["widget_fig_font_size"])
+    alpha = float(st.session_state["widget_fig_alpha"])
+    heatmap_norm = str(st.session_state["widget_fig_heatmap_norm"])
+    custom_text = st.session_state["widget_fig_custom_highlights"]
+
+    # ------------------------------------------------------------------
+    # Gene resolution via tx2gene
+    # ------------------------------------------------------------------
+    # The volcano / strip / heatmap / regmode table all need a
+    # symbol -> gene_id map to translate user-facing labels into the
+    # Ensembl IDs the salmon matrices and contrast tables are indexed
+    # by. The tx2gene TSV is the single source of truth — we reuse
+    # the same file the Pipeline and Analysis tabs point at.
+    _fig_path_errs = validate_reference_paths(
+        cfg.salmon_index, cfg.tx2gene_tsv
+    )
+    if _fig_path_errs:
+        st.error(
+            "Figures need a valid tx2gene TSV to resolve gene symbols.\n\n- "
+            + "\n- ".join(_fig_path_errs)
+            + "\n\nFix them on the Config tab (or rebuild via the "
+            "Reference tab and click **Use these paths in Config**)."
+        )
+    else:
+        try:
+            _symbol_map = load_gene_symbol_map(Path(cfg.tx2gene_tsv))
+        except FileNotFoundError as exc:
+            _symbol_map = {}
+            st.error(f"Could not read tx2gene: {exc}")
+
+        if not _symbol_map:
+            st.warning(
+                "tx2gene TSV has no gene-symbol column (2-column "
+                "format). Rebuild from the Reference tab to get a "
+                "3-column tx2gene with gene names — otherwise the "
+                "highlight fields can't map symbols to gene IDs."
+            )
+
+        galanin_resolved, galanin_missing = resolve_symbols(
+            GALANIN_GENES, _symbol_map
+        )
+        custom_symbols = parse_highlight_text(custom_text)
+        custom_resolved, custom_missing = resolve_symbols(
+            custom_symbols, _symbol_map
+        )
+
+        # Surface resolution status so the user sees typos immediately.
+        _resolved_cols = st.columns(2)
+        with _resolved_cols[0]:
+            if galanin_resolved:
+                st.caption(
+                    f"✅ Galanin resolved: {len(galanin_resolved)} / "
+                    f"{len(GALANIN_GENES)}"
+                )
+            if galanin_missing:
+                st.warning(
+                    "Galanin genes not found in tx2gene: "
+                    + ", ".join(galanin_missing)
+                )
+        with _resolved_cols[1]:
+            if custom_resolved:
+                st.caption(
+                    f"✅ Custom resolved: {len(custom_resolved)}"
+                )
+            if custom_missing:
+                st.warning(
+                    "Custom genes not found in tx2gene: "
+                    + ", ".join(custom_missing)
+                )
+
+        # Merged gene set for the per-gene panels (B and C).
+        all_highlighted = {**galanin_resolved, **custom_resolved}
+        primary_ids = set(galanin_resolved.keys())
+
+        # --------------------------------------------------------------
+        # Data-readiness check — need at least the salmon matrices and
+        # one contrast's Mann-Whitney result. Panels degrade gracefully
+        # when upstream bits are missing.
+        # --------------------------------------------------------------
+        _matrices = st.session_state.get("salmon_matrices")
+        _analysis = st.session_state.get("analysis", {})
+
+        if not _matrices:
+            st.info(
+                "Load salmon quant outputs from the **Analysis** tab "
+                "first, then click **Compute IP/Input ratios + "
+                "Mann-Whitney** for each contrast you want in the "
+                "figures. Run **anota2seq** too for the regulatory-"
+                "mode classification table."
+            )
+        else:
+            contrasts_with_results = [
+                c for c, panel in _analysis.items()
+                if panel.get("contrast_result") is not None
+            ]
+
+            st.divider()
+
+            # ----------------------------------------------------------
+            # Panel A — Volcano plots (one per configured contrast)
+            # ----------------------------------------------------------
+            st.subheader("A — Volcano plots")
+            st.caption(
+                "x: delta log₂(IP/Input) (alt − ref). "
+                "y: −log₁₀(Mann-Whitney p). "
+                "Crimson = galanin core, blue = custom highlights. "
+                "Dashed horizontal line marks the padj threshold."
+            )
+            if not contrasts_with_results:
+                st.info(
+                    "No contrast Mann-Whitney results yet. Run "
+                    "**Compute IP/Input ratios + Mann-Whitney** on the "
+                    "Analysis tab for at least one contrast."
+                )
+            else:
+                for _contrast_name in contrasts_with_results:
+                    _cr = _analysis[_contrast_name]["contrast_result"]
+                    _fig = volcano_plot(
+                        _cr.table,
+                        title=f"Volcano — {_contrast_name}",
+                        alpha=alpha,
+                        highlight_primary=galanin_resolved,
+                        highlight_secondary=custom_resolved,
+                        font_size=font_size,
+                    )
+                    st.plotly_chart(
+                        _fig, use_container_width=True,
+                        key=f"fig_volcano_{_contrast_name}",
+                    )
+                    _figure_download_row(
+                        _fig, f"volcano_{_contrast_name}"
+                    )
+
+            st.divider()
+
+            # ----------------------------------------------------------
+            # Panel B — Per-gene log2(IP/Input) strip plot
+            # ----------------------------------------------------------
+            st.subheader("B — Per-gene log₂(IP/Input)")
+            st.caption(
+                "Every animal as an individual dot, grouped by diet. "
+                "Short black bars mark group means. This is the panel "
+                "reviewers will ask for — it shows the effect is "
+                "present at the animal level, not just in aggregate."
+            )
+            _any_ratios = None
+            for _panel in _analysis.values():
+                if _panel.get("ratios") is not None:
+                    _any_ratios = _panel["ratios"]
+                    break
+            if _any_ratios is None:
+                st.info(
+                    "Needs ratios from **Compute IP/Input ratios + "
+                    "Mann-Whitney** on the Analysis tab."
+                )
+            elif not all_highlighted:
+                st.info(
+                    "No resolved highlight genes. Check the galanin "
+                    "resolution status above — if galanin genes aren't "
+                    "in your tx2gene, rebuild from the Reference tab."
+                )
+            else:
+                _fig = per_gene_strip(
+                    _any_ratios.ratios,
+                    _any_ratios.pair_labels,
+                    title="Galanin signaling — log₂(IP/Input)",
+                    gene_labels=all_highlighted,
+                    primary_ids=primary_ids,
+                    font_size=font_size,
+                    group_order=list(GROUPS),
+                )
+                st.plotly_chart(
+                    _fig, use_container_width=True,
+                    key="fig_per_gene_strip",
+                )
+                _figure_download_row(_fig, "per_gene_strip")
+
+            st.divider()
+
+            # ----------------------------------------------------------
+            # Panel C — Expression heatmap
+            # ----------------------------------------------------------
+            st.subheader("C — Expression heatmap")
+            st.caption(
+                "Rows: genes. Columns: the 18 samples grouped by "
+                "(group × fraction). Default z-score across rows — "
+                "switch to log₂(FPKM+1) or raw FPKM in the controls "
+                "above if you want expression levels instead of "
+                "deviation patterns."
+            )
+            if _matrices["fpkm"].empty:
+                st.info("salmon FPKM matrix is empty.")
+            elif not all_highlighted:
+                st.info("No resolved highlight genes.")
+            else:
+                _fig = expression_heatmap(
+                    _matrices["fpkm"],
+                    _matrices["records"],
+                    title="Galanin signaling expression",
+                    gene_labels=all_highlighted,
+                    font_size=font_size,
+                    normalize=heatmap_norm,
+                    group_order=list(GROUPS),
+                )
+                st.plotly_chart(
+                    _fig, use_container_width=True,
+                    key="fig_expression_heatmap",
+                )
+                _figure_download_row(_fig, "heatmap")
+
+            st.divider()
+
+            # ----------------------------------------------------------
+            # Panel D — anota2seq regulatory mode table
+            # ----------------------------------------------------------
+            st.subheader("D — anota2seq regulatory mode")
+            st.caption(
+                "Per gene × per contrast. Translation hits float to "
+                "the top — those are the genes whose ribosome "
+                "association genuinely changed without a matching "
+                "total-mRNA change. Needs a successful anota2seq run "
+                "on the Analysis tab."
+            )
+            _anota_results = {
+                c: panel["anota2seq"]
+                for c, panel in _analysis.items()
+                if panel.get("anota2seq") is not None
+                and getattr(panel["anota2seq"], "ok", False)
+            }
+            if not _anota_results:
+                st.info(
+                    "Run **anota2seq** on the Analysis tab for at "
+                    "least one contrast to populate this table."
+                )
+            elif not all_highlighted:
+                st.info("No resolved highlight genes.")
+            else:
+                _regmode_df = regmode_classification(
+                    _anota_results, all_highlighted
+                )
+                st.dataframe(
+                    _regmode_df,
+                    hide_index=True,
+                    use_container_width=True,
+                )
+                st.download_button(
+                    "Download regmode table (TSV)",
+                    data=_regmode_df.to_csv(sep="\t", index=False),
+                    file_name="galanin_regmode.tsv",
+                    mime="text/tab-separated-values",
+                    key="fig_regmode_tsv_dl",
+                )
+
+            st.divider()
+
+            # ----------------------------------------------------------
+            # Panel E — Cross-contrast consistency scatter
+            # ----------------------------------------------------------
+            st.subheader("E — Cross-contrast consistency")
+            st.caption(
+                "log₂ FC from the first two contrasts on x and y. "
+                "Points near the diagonal are consistent across both "
+                "HSD durations — the most persuasive reproducibility "
+                "evidence for a chronic-stimulus n=3-per-group design."
+            )
+            if len(contrasts_with_results) < 2:
+                st.info(
+                    "Needs Mann-Whitney results for at least two "
+                    "contrasts (e.g. HSD1_vs_NCD AND HSD3_vs_NCD)."
+                )
+            else:
+                _name_a, _name_b = contrasts_with_results[:2]
+                _fig = cross_contrast_scatter(
+                    _analysis[_name_a]["contrast_result"].table,
+                    _analysis[_name_b]["contrast_result"].table,
+                    label_a=_name_a,
+                    label_b=_name_b,
+                    title=f"{_name_a}  vs  {_name_b}",
+                    highlight_primary=galanin_resolved,
+                    highlight_secondary=custom_resolved,
+                    font_size=font_size,
+                )
+                st.plotly_chart(
+                    _fig, use_container_width=True,
+                    key="fig_cross_contrast",
+                )
+                _figure_download_row(_fig, "cross_contrast")
+
+# ======================================================================
+# LOGS TAB
+# ======================================================================
+with tabs[6]:
     st.header("Logs")
 
     # Staged-clear pattern: if the user hit "Clear filter" on the previous
