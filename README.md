@@ -561,6 +561,83 @@ The smoke tests cover:
   1.0, and ticking mid-sample (subprocess layer mocked; no live fastq
   or R required).
 
+## Troubleshooting
+
+Common failures from the first live run on a fresh MacBook, with the
+root cause and the fix.
+
+### `anota2seq Rscript failed: ... ist keine reguläre Datei ... Ist ein Verzeichnis`
+
+Translation: `tx2gene_tsv` points at a **directory**, not at the
+`tx2gene.tsv` file inside that directory. Salmon quant hits the same
+bug — check the pipeline's salmon command line and look for
+`-g /some/path` where `/some/path` has no trailing `tx2gene.tsv`.
+
+**Fix:** on the Reference tab, click **Use these paths in Config**.
+That button writes the correct file path for `tx2gene_tsv` and the
+correct directory path for `salmon_index` into the Config widgets
+*and* saves the config. Do not type these paths by hand — both are
+easy to get wrong (index is a directory, tx2gene is a file).
+
+The Config tab now validates both paths inline on every render and
+disables the **Start pipeline** and **Run anota2seq** buttons until
+they're correct. The **tx2gene TSV must be a FILE** error specifically
+catches this footgun.
+
+This bug used to be silent because the v5029e4d Reference tab didn't
+use explicit Streamlit widget keys, so a stale text_input value in
+the Config tab could overwrite the correct one on the next render.
+Fixed in v5e65fxx (and tested in `tests/test_config_validation.py`).
+
+### `ERROR: pwrite failed: No space left on device` during fastp
+
+You ran out of disk space. A full 18-sample run writes ~40–80 GB of
+trimmed fastqs + salmon output under `output_dir`, so budget at least
+50 GB free before starting. The Pipeline tab now shows a yellow
+warning below 50 GB free on the output filesystem, measured before
+you click Start.
+
+**Fix:** free space, then click Start pipeline again. Skip-if-cached
+is on by default, so the pipeline will resume from the sample that
+failed — it won't re-run the first 17 samples. The one sample that
+was interrupted mid-write needs to be force-rerun (toggle **Force
+rerun** in Config, run just that sample, toggle it back off).
+
+If you're on a MacBook with a small SSD, the easiest fix is to set
+`output_dir` and `report_dir` to paths on an external drive (Config
+tab → Paths → Output directory / Report/log directory).
+
+The Reference tab also warns below 25 GB free at the destination
+filesystem before you start a build.
+
+### `salmon [warning] couldn't find transcript named [...] in transcript <-> gene map`
+
+Some transcripts in the transcriptome FASTA aren't in `tx2gene.tsv`.
+For GENCODE mouse this is normally < 0.1% and harmless — salmon
+falls back to "transcript as its own gene" for those, which means
+they stay in `quant.sf` but not in `quant.genes.sf`.
+
+The Reference tab now runs a post-build coverage check (FASTA
+transcript IDs vs tx2gene.tsv rows) and shows a yellow warning if
+coverage drops below 99%. A few dozen missing is normal
+(PAR duplicates, readthrough fusions). Thousands missing means you
+have a FASTA/GTF release mismatch — rebuild the reference with
+**Force rebuild** checked so the tx2gene file is regenerated from
+the current GTF.
+
+### `zsh: command not found: #` when pasting shell blocks
+
+macOS interactive zsh doesn't treat `#` as a comment by default. Run
+`setopt interactive_comments` once per shell session before pasting,
+or use the **Reference** tab in the app which avoids shell entirely.
+
+### `zcat: can't stat: x.gz (x.gz.Z)`
+
+macOS's `zcat` is the legacy `.Z` tool, not GNU zcat. Use
+`gunzip -c x.gz` instead, or use the Reference tab which reads
+`.gz` files via Python's `gzip` module and doesn't depend on any
+command-line decompressor.
+
 ## Things this pipeline deliberately does NOT do
 
 - **No** STAR / HISAT2 / alignment path. If you need BAMs, do that

@@ -12,6 +12,7 @@ rather than footprint-oriented tools.
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import asdict
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from phosphotrap.config import (
     contrasts_for_reference,
     reconcile_contrasts,
     resolve_rscript,
+    validate_reference_paths,
 )
 from phosphotrap.deseq2_runner import run_deseq2_interaction
 from phosphotrap.fpkm import (
@@ -135,15 +137,36 @@ with tabs[0]:
     # cfg. Rendering it at the top would show state from the previous
     # rerun — always one step behind whatever the user sees on screen.
 
+    # Path text_inputs use explicit keys so other tabs (most importantly
+    # the Reference tab's "Use these paths in Config" button) can update
+    # them via ``st.session_state[key] = ...`` and have the change show
+    # up on the next render. Without explicit keys, Streamlit generates
+    # its own key from the label + default value, then ignores the
+    # ``value=`` argument on subsequent renders — which meant a
+    # programmatic update to ``cfg.salmon_index`` from another tab
+    # would silently get overwritten by the stale widget value on the
+    # next Config-tab render. That's how v5029e4d put a directory path
+    # into ``cfg.tx2gene_tsv`` and broke salmon quant + anota2seq.
+    _PATH_KEYS = {
+        "widget_fastq_dir": "fastq_dir",
+        "widget_salmon_index": "salmon_index",
+        "widget_tx2gene_tsv": "tx2gene_tsv",
+        "widget_output_dir": "output_dir",
+        "widget_report_dir": "report_dir",
+        "widget_rscript_path": "rscript_path",
+    }
+    for _wkey, _attr in _PATH_KEYS.items():
+        st.session_state.setdefault(_wkey, getattr(cfg, _attr))
+
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("Paths")
-        cfg.fastq_dir    = st.text_input("Fastq directory", cfg.fastq_dir)
-        cfg.salmon_index = st.text_input("Salmon index",     cfg.salmon_index)
-        cfg.tx2gene_tsv  = st.text_input("tx2gene TSV (2- or 3-col)", cfg.tx2gene_tsv)
-        cfg.output_dir   = st.text_input("Output directory",  cfg.output_dir)
-        cfg.report_dir   = st.text_input("Report/log directory", cfg.report_dir)
-        cfg.rscript_path = st.text_input("Rscript path",       cfg.rscript_path)
+        st.text_input("Fastq directory", key="widget_fastq_dir")
+        st.text_input("Salmon index", key="widget_salmon_index")
+        st.text_input("tx2gene TSV (2- or 3-col)", key="widget_tx2gene_tsv")
+        st.text_input("Output directory", key="widget_output_dir")
+        st.text_input("Report/log directory", key="widget_report_dir")
+        st.text_input("Rscript path", key="widget_rscript_path")
     with col_b:
         st.subheader("Runtime")
         cfg.threads      = int(st.number_input("Threads", min_value=1, max_value=128, value=int(cfg.threads)))
@@ -241,12 +264,57 @@ with tabs[0]:
         st.number_input("maxSlopeTranslation", key="widget_anota_max_slope_trans", step=0.1, format="%.2f")
 
     # Copy widget state back into cfg so save/diff see the live values.
+    for _wkey, _attr in _PATH_KEYS.items():
+        setattr(cfg, _attr, st.session_state[_wkey])
     cfg.anota_delta_pt        = float(st.session_state["widget_anota_delta_pt"])
     cfg.anota_delta_tp        = float(st.session_state["widget_anota_delta_tp"])
     cfg.anota_max_padj        = float(st.session_state["widget_anota_max_padj"])
     cfg.anota_min_slope_trans = float(st.session_state["widget_anota_min_slope_trans"])
     cfg.anota_max_slope_trans = float(st.session_state["widget_anota_max_slope_trans"])
     cfg.min_fpkm              = float(st.session_state["widget_min_fpkm"])
+
+    # Inline validation of the two paths that salmon quant and
+    # tximport actually touch. Catches the "tx2gene_tsv points at a
+    # directory" footgun before the pipeline button is ever clicked,
+    # and points the user back at the Reference tab.
+    _path_errs: list[str] = []
+    if cfg.salmon_index:
+        _p = Path(cfg.salmon_index).expanduser()
+        if not _p.exists():
+            _path_errs.append(
+                f"Salmon index path does not exist: `{_p}`"
+            )
+        elif not _p.is_dir():
+            _path_errs.append(
+                f"Salmon index must be a **directory** (the folder "
+                f"containing `info.json`, `pos.bin`, `seq.bin`, …), "
+                f"not a file: `{_p}`"
+            )
+        elif not (_p / "info.json").exists():
+            _path_errs.append(
+                f"Salmon index directory `{_p}` has no `info.json`. "
+                f"This doesn't look like a built salmon index — "
+                f"rebuild it via the Reference tab."
+            )
+    if cfg.tx2gene_tsv:
+        _t = Path(cfg.tx2gene_tsv).expanduser()
+        if not _t.exists():
+            _path_errs.append(
+                f"tx2gene TSV path does not exist: `{_t}`"
+            )
+        elif _t.is_dir():
+            _path_errs.append(
+                f"tx2gene TSV must be a **file** (`tx2gene.tsv`), "
+                f"not a directory: `{_t}`. If you built the reference "
+                f"via the Reference tab, the correct file lives inside "
+                f"that directory — click **Use these paths in Config** "
+                f"on the Reference tab to auto-populate, or append "
+                f"`/tx2gene.tsv` to this path by hand."
+            )
+    if _path_errs:
+        st.error(
+            "Path validation:\n\n- " + "\n- ".join(_path_errs)
+        )
 
     st.divider()
 
@@ -378,6 +446,27 @@ with tabs[1]:
     except ValueError as exc:
         st.error(str(exc))
 
+    # Pre-flight disk space check. The full build lands ~2 GB of
+    # downloads + ~15 GB of index + intermediates. Warn below 25 GB
+    # free on the destination's filesystem so the user finds out
+    # BEFORE spending an hour downloading into a doomed run.
+    try:
+        _probe_dir = Path(ref_dest).expanduser()
+        while not _probe_dir.exists() and _probe_dir != _probe_dir.parent:
+            _probe_dir = _probe_dir.parent
+        _free_gb = shutil.disk_usage(_probe_dir).free / 1e9
+        if _free_gb < 25:
+            st.warning(
+                f"Only {_free_gb:.1f} GB free on the destination "
+                f"filesystem. A full GENCODE mouse build needs ~20 GB "
+                f"of transient space and ~15 GB persistent. Free up "
+                f"space or pick a destination on a larger drive."
+            )
+        else:
+            st.caption(f"Disk space OK: {_free_gb:.0f} GB free at {_probe_dir}.")
+    except Exception as _exc:  # pragma: no cover - defensive
+        st.caption(f"(could not probe disk space: {_exc})")
+
     # Progress bar lives in an st.empty() so it disappears between runs
     # — same pattern as the Pipeline tab, for the same reason (a static
     # 1.0-filled bar after a completed run looks like work in progress).
@@ -431,14 +520,62 @@ with tabs[1]:
                 "genome_fa": str(artifacts.genome_fa),
                 "gtf": str(artifacts.gtf),
                 "n_transcripts": artifacts.n_transcripts,
+                "n_fasta_transcripts": artifacts.n_fasta_transcripts,
+                "tx2gene_coverage": round(artifacts.tx2gene_coverage, 4),
             }
         )
+
+        # Surface a coverage warning inline if the tx2gene doesn't
+        # cover ~all of the transcripts in the salmon index's FASTA.
+        # 99% is the threshold because GENCODE occasionally ships a
+        # handful of transcripts in the FASTA that aren't in the
+        # primary-assembly GTF (PAR duplicates, readthrough fusion
+        # entries). A few dozen missing is normal; thousands isn't.
+        if (
+            artifacts.n_fasta_transcripts > 0
+            and artifacts.tx2gene_coverage < 0.99
+        ):
+            _missing = (
+                artifacts.n_fasta_transcripts - artifacts.n_transcripts
+            )
+            st.warning(
+                f"tx2gene coverage is "
+                f"{artifacts.tx2gene_coverage * 100:.2f}% "
+                f"({artifacts.n_transcripts} / "
+                f"{artifacts.n_fasta_transcripts}). "
+                f"{_missing} transcript(s) in the transcriptome FASTA "
+                f"are missing from tx2gene.tsv — salmon quant will "
+                f"emit per-missing-transcript warnings for these at "
+                f"runtime and they'll fall through as 'transcript as "
+                f"its own gene'. For GENCODE mouse this is usually "
+                f"<0.1% and harmless, but if the number is large you "
+                f"may have a FASTA/GTF release mismatch."
+            )
+        elif artifacts.n_fasta_transcripts > 0:
+            st.caption(
+                f"tx2gene coverage "
+                f"{artifacts.tx2gene_coverage * 100:.2f}% — OK."
+            )
 
         acol1, acol2 = st.columns(2)
         with acol1:
             if st.button("Use these paths in Config", type="primary"):
+                # Write to BOTH the live cfg and the Config tab's
+                # text_input session-state keys. Mutating cfg alone is
+                # not enough: the Config tab's text_inputs own their
+                # session state, and on the next render would read
+                # their cached (stale) value and overwrite cfg with
+                # it. This is exactly how v5029e4d ended up running
+                # salmon quant with `-g <directory>` instead of
+                # `-g <dir>/tx2gene.tsv`.
                 cfg.salmon_index = str(artifacts.index_dir)
                 cfg.tx2gene_tsv = str(artifacts.tx2gene_tsv)
+                st.session_state["widget_salmon_index"] = str(
+                    artifacts.index_dir
+                )
+                st.session_state["widget_tx2gene_tsv"] = str(
+                    artifacts.tx2gene_tsv
+                )
                 try:
                     cfg.save(DEFAULT_CONFIG_PATH)
                     st.session_state.disk_config = AppConfig.load(
@@ -555,7 +692,45 @@ with tabs[3]:
         "not a wall-clock ETA — fastp and salmon don't emit parseable progress."
     )
 
-    if st.button("Start pipeline", type="primary", disabled=not selected and not dry_run):
+    # Path validation and disk-space preflight. Both run on every
+    # render so the user sees the problem immediately, not only after
+    # clicking Start pipeline.
+    _pipe_errs = validate_reference_paths(cfg.salmon_index, cfg.tx2gene_tsv)
+    if _pipe_errs and not dry_run:
+        st.error(
+            "Cannot start pipeline — reference paths are invalid:\n\n- "
+            + "\n- ".join(_pipe_errs)
+            + "\n\nBuild or rebuild the index from the **Reference** tab "
+            "and click **Use these paths in Config**."
+        )
+
+    # Disk-space preflight against the output filesystem. The trimmed
+    # fastqs + salmon output for an 18-sample NovaSeq run like this
+    # one typically land in the 40-80 GB range, so warn below 50 GB.
+    try:
+        _out_probe = cfg.effective_output_dir()
+        while not _out_probe.exists() and _out_probe != _out_probe.parent:
+            _out_probe = _out_probe.parent
+        _pipe_free_gb = shutil.disk_usage(_out_probe).free / 1e9
+        if _pipe_free_gb < 50 and not dry_run:
+            st.warning(
+                f"Only {_pipe_free_gb:.1f} GB free on the output "
+                f"filesystem at {_out_probe}. Each of the 18 samples "
+                f"writes ~2 GB of trimmed fastqs + ~1 GB of salmon "
+                f"output, so budget ~50 GB for a complete run. "
+                f"Running out of space mid-pipeline corrupts the "
+                f"last sample and silently leaves earlier ones "
+                f"cached — free space before starting."
+            )
+    except Exception as _exc:  # pragma: no cover - defensive
+        logger.warning("disk-space probe failed: %s", _exc)
+
+    _start_disabled = (not selected and not dry_run) or bool(
+        _pipe_errs and not dry_run
+    )
+    if st.button(
+        "Start pipeline", type="primary", disabled=_start_disabled
+    ):
         # Auto-save current config first.
         try:
             cfg.save(DEFAULT_CONFIG_PATH)
@@ -654,13 +829,33 @@ with tabs[4]:
         )
 
     st.divider()
+
+    # anota2seq and DESeq2 both read ``tx2gene_tsv`` via tximport, so
+    # the same footgun that broke salmon quant (directory path instead
+    # of file path) breaks them too. Validate here so the user sees a
+    # clear error instead of an R traceback in German.
+    _analysis_errs = validate_reference_paths(
+        cfg.salmon_index, cfg.tx2gene_tsv
+    )
+    _r_disabled = bool(_analysis_errs)
+    if _analysis_errs:
+        st.error(
+            "anota2seq and DESeq2 buttons disabled — reference paths "
+            "are invalid:\n\n- "
+            + "\n- ".join(_analysis_errs)
+            + "\n\nFix them on the Config tab (or rebuild via the "
+            "Reference tab and click **Use these paths in Config**)."
+        )
+
     bcol1, bcol2, bcol3 = st.columns(3)
     with bcol1:
         run_ratio = st.button("Compute IP/Input ratios + Mann-Whitney")
     with bcol2:
-        run_anota = st.button("Run anota2seq")
+        run_anota = st.button("Run anota2seq", disabled=_r_disabled)
     with bcol3:
-        run_deseq = st.button("DESeq2 interaction cross-check")
+        run_deseq = st.button(
+            "DESeq2 interaction cross-check", disabled=_r_disabled
+        )
 
     if run_ratio:
         if not matrices:

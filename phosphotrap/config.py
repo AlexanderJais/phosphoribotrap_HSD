@@ -94,6 +94,60 @@ def contrasts_for_reference(ref_group: str, all_groups: tuple[str, ...]) -> list
     return contrasts
 
 
+def validate_reference_paths(
+    salmon_index: str, tx2gene_tsv: str
+) -> list[str]:
+    """Return a list of human-readable errors for the two reference paths.
+
+    Catches the two footguns that v5029e4d's Reference tab was not
+    defensive enough to prevent:
+
+    1. ``salmon_index`` pointing at a file or a non-index directory.
+    2. ``tx2gene_tsv`` pointing at a directory (e.g. the Reference
+       tab's destination directory) instead of the ``tx2gene.tsv``
+       file inside it.
+
+    An empty list means "looks OK". Callers should surface the errors
+    via ``st.error`` and refuse to proceed.
+    """
+    errs: list[str] = []
+
+    if not salmon_index:
+        errs.append("Salmon index path is empty.")
+    else:
+        p = Path(salmon_index).expanduser()
+        if not p.exists():
+            errs.append(f"Salmon index path does not exist: {p}")
+        elif not p.is_dir():
+            errs.append(
+                f"Salmon index must be a directory, not a file: {p}"
+            )
+        elif not (p / "info.json").exists():
+            errs.append(
+                f"Salmon index directory {p} has no info.json — "
+                f"this does not look like a built salmon index. "
+                f"Rebuild via the Reference tab."
+            )
+
+    if not tx2gene_tsv:
+        errs.append("tx2gene TSV path is empty.")
+    else:
+        t = Path(tx2gene_tsv).expanduser()
+        if not t.exists():
+            errs.append(f"tx2gene TSV path does not exist: {t}")
+        elif t.is_dir():
+            errs.append(
+                f"tx2gene TSV must be a FILE (tx2gene.tsv), not a "
+                f"directory: {t}. On the Reference tab, click "
+                f"'Use these paths in Config' to auto-populate the "
+                f"correct file path."
+            )
+        elif t.stat().st_size == 0:
+            errs.append(f"tx2gene TSV is empty: {t}")
+
+    return errs
+
+
 def reconcile_contrasts(current: list[str], available: list[str]) -> list[str]:
     """Filter ``current`` down to entries still present in ``available``.
 

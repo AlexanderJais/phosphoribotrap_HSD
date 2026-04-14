@@ -109,6 +109,13 @@ class ReferenceArtifacts:
     decoys: Path
     gentrome: Path
     n_transcripts: int
+    # Number of transcripts in the transcriptome FASTA (the salmon
+    # index's universe) and fraction of those that appear in the
+    # tx2gene.tsv file. A value < 0.99 means salmon quant will emit
+    # per-missing-transcript warnings at runtime and drop those
+    # transcripts out of the gene-level ``quant.genes.sf`` output.
+    n_fasta_transcripts: int = 0
+    tx2gene_coverage: float = 0.0
 
 
 # ----------------------------------------------------------------------
@@ -206,6 +213,58 @@ def build_decoys(genome_fa_gz: Path, dest: Path) -> int:
                     n += 1
     logger.info("wrote %d decoy contig names to %s", n, dest)
     return n
+
+
+def count_fasta_transcripts(transcripts_fa_gz: Path) -> int:
+    """Count ``>`` records in a gzipped transcriptome FASTA.
+
+    Used by the post-build sanity check to compute tx2gene coverage:
+    ``n_tx2gene_rows / n_fasta_transcripts``. A fraction below 0.99
+    means salmon quant will warn about missing transcript->gene
+    entries at runtime.
+    """
+    n = 0
+    with gzip.open(transcripts_fa_gz, "rt") as fh:
+        for line in fh:
+            if line.startswith(">"):
+                n += 1
+    return n
+
+
+def tx2gene_transcript_ids(tx2gene_tsv: Path) -> set[str]:
+    """Return the set of transcript IDs (column 1) in a tx2gene TSV."""
+    out: set[str] = set()
+    with Path(tx2gene_tsv).open("r") as fh:
+        for line in fh:
+            if not line:
+                continue
+            tid = line.split("\t", 1)[0].strip()
+            if tid:
+                out.add(tid)
+    return out
+
+
+def fasta_transcript_ids(
+    transcripts_fa_gz: Path, *, gencode: bool = True
+) -> set[str]:
+    """Return the set of transcript IDs in a gzipped transcriptome FASTA.
+
+    When ``gencode`` is True (the default), splits ``|``-delimited
+    GENCODE-style headers on the first ``|`` just like
+    ``salmon index --gencode`` does internally, so the returned IDs
+    match what the salmon index stores.
+    """
+    out: set[str] = set()
+    with gzip.open(transcripts_fa_gz, "rt") as fh:
+        for line in fh:
+            if not line.startswith(">"):
+                continue
+            header = line[1:].split()[0] if len(line) > 1 else ""
+            if gencode and "|" in header:
+                header = header.split("|", 1)[0]
+            if header:
+                out.add(header)
+    return out
 
 
 def build_gentrome(
@@ -539,6 +598,44 @@ def build_reference(
             )
     completed += _STAGE_WEIGHTS["tx2gene"]
 
+    # 6. Coverage sanity check. Compare the transcript IDs in the
+    #    transcriptome FASTA (the salmon index's universe) against the
+    #    transcript IDs in tx2gene.tsv. If coverage is below 99%, salmon
+    #    quant will emit per-missing-transcript warnings at runtime and
+    #    those transcripts will fall through to "transcript as its own
+    #    gene" — they'll still be quantified, but downstream tximport
+    #    won't aggregate them into gene-level counts correctly.
+    try:
+        fasta_ids = fasta_transcript_ids(transcripts_fa, gencode=True)
+        tx2g_ids = tx2gene_transcript_ids(tx2gene)
+        n_fasta = len(fasta_ids)
+        if n_fasta > 0:
+            missing = fasta_ids - tx2g_ids
+            coverage = 1.0 - (len(missing) / n_fasta)
+        else:
+            coverage = 0.0
+        if coverage < 0.99:
+            logger.warning(
+                "tx2gene coverage %.2f%% (%d / %d FASTA transcripts "
+                "found in tx2gene.tsv). Missing %d — salmon quant "
+                "will warn on those at runtime.",
+                coverage * 100,
+                n_fasta - len(missing),
+                n_fasta,
+                len(missing),
+            )
+        else:
+            logger.info(
+                "tx2gene coverage %.2f%% (%d / %d)",
+                coverage * 100,
+                n_fasta - len(missing),
+                n_fasta,
+            )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("coverage check failed: %s", exc)
+        n_fasta = 0
+        coverage = 0.0
+
     if progress_cb is not None:
         progress_cb(1.0, "reference build complete")
 
@@ -551,4 +648,6 @@ def build_reference(
         decoys=decoys,
         gentrome=gentrome,
         n_transcripts=n_tx,
+        n_fasta_transcripts=n_fasta,
+        tx2gene_coverage=coverage,
     )

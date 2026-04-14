@@ -154,6 +154,60 @@ def test_build_tx2gene_progress_callback_monotonic(tmp_path: Path):
 
 
 # ----------------------------------------------------------------------
+# FASTA transcript ID helpers (coverage check)
+# ----------------------------------------------------------------------
+# GENCODE transcriptome FASTAs use "|"-delimited headers; salmon's
+# --gencode flag splits on the first "|". Our helpers must do the same
+# so coverage comparisons line up.
+_GENCODE_FASTA = (
+    b">ENSMUST00000000001.4|ENSMUSG00000000001.1|OTTMUSG00000049935.1|"
+    b"OTTMUST00000127195.2|Gnai3-201|Gnai3|3262|\n"
+    b"ACGTACGT\n"
+    b">ENSMUST00000000002.1|ENSMUSG00000000001.1|-|-|Gnai3-202|Gnai3|"
+    b"800|\n"
+    b"ACGT\n"
+    b">ENSMUST99999999999.1|ENSMUSG99999999999.1|-|-|Orphan-201|"
+    b"Orphan|500|\n"
+    b"ACGT\n"
+)
+
+
+def test_count_fasta_transcripts(tmp_path: Path):
+    fa = _gz_write(tmp_path / "tx.fa.gz", _GENCODE_FASTA)
+    assert ref.count_fasta_transcripts(fa) == 3
+
+
+def test_fasta_transcript_ids_strips_gencode_pipe(tmp_path: Path):
+    fa = _gz_write(tmp_path / "tx.fa.gz", _GENCODE_FASTA)
+    ids = ref.fasta_transcript_ids(fa, gencode=True)
+    assert ids == {
+        "ENSMUST00000000001.4",
+        "ENSMUST00000000002.1",
+        "ENSMUST99999999999.1",
+    }
+
+
+def test_fasta_transcript_ids_without_gencode_keeps_full_header(
+    tmp_path: Path,
+):
+    fa = _gz_write(tmp_path / "tx.fa.gz", _GENCODE_FASTA)
+    ids = ref.fasta_transcript_ids(fa, gencode=False)
+    # Headers with "|" still resolved — we just keep the whole token.
+    assert all("|" in i for i in ids)
+    assert len(ids) == 3
+
+
+def test_tx2gene_transcript_ids(tmp_path: Path):
+    tx = tmp_path / "tx2gene.tsv"
+    tx.write_text(
+        "ENSMUST00000000001.4\tENSMUSG00000000001.1\tGnai3\n"
+        "ENSMUST00000000002.1\tENSMUSG00000000001.1\tGnai3\n"
+    )
+    ids = ref.tx2gene_transcript_ids(tx)
+    assert ids == {"ENSMUST00000000001.4", "ENSMUST00000000002.1"}
+
+
+# ----------------------------------------------------------------------
 # download_file
 # ----------------------------------------------------------------------
 def test_download_file_skips_when_present(tmp_path: Path):
@@ -240,9 +294,67 @@ def test_build_reference_orchestrates_with_mocked_downloads(tmp_path: Path):
     assert artifacts.gentrome.exists()
     assert artifacts.n_transcripts == 3
 
+    # Coverage was computed. The fake fixture's FASTA has 1 transcript
+    # (">tx1") that isn't in tx2gene.tsv (which was built from the GTF
+    # and has ENSMUST00000000001.4 / .0002.1 / .0099.2). So coverage
+    # should be 0.0 — 0/1 FASTA transcripts found in tx2gene. What we
+    # care about here is that the FIELDS are populated, not the
+    # specific ratio.
+    assert artifacts.n_fasta_transcripts >= 1
+    assert 0.0 <= artifacts.tx2gene_coverage <= 1.0
+
     # Progress monotonic + reaches 1.0.
     assert all(b >= a for a, b in zip(seen, seen[1:]))
     assert seen[-1] == pytest.approx(1.0)
+
+
+def test_build_reference_coverage_is_1_when_tx2gene_covers_fasta(
+    tmp_path: Path,
+):
+    """When the FASTA headers match tx2gene transcript IDs, coverage is 1.0."""
+    dest = tmp_path / "ref"
+
+    # Matching GENCODE FASTA + GTF: the FASTA headers contain the same
+    # transcript IDs the GTF declares, so tx2gene coverage is perfect.
+    matched_fasta = (
+        b">ENSMUST00000000001.4|ENSMUSG00000000001.1|-|-|Gnai3-201|"
+        b"Gnai3|3262|\n"
+        b"ACGT\n"
+        b">ENSMUST00000000002.1|ENSMUSG00000000001.1|-|-|Gnai3-202|"
+        b"Gnai3|800|\n"
+        b"ACGT\n"
+        b">ENSMUST00000000099.2|ENSMUSG00000000099.2|-|-|orphan-201|"
+        b"Orphan|500|\n"
+        b"ACGT\n"
+    )
+
+    def fake_download(url, dest_path, *, force=False, progress_cb=None,
+                      chunk_size=0, label=None):
+        dest_path = Path(dest_path)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        if "transcripts" in dest_path.name:
+            _gz_write(dest_path, matched_fasta)
+        elif "genome" in dest_path.name:
+            _gz_write(dest_path, _FAKE_GENOME)
+        else:
+            _gz_write(dest_path, _FAKE_GTF)
+        return dest_path
+
+    def fake_salmon_index(gentrome, decoys, index_dir, *, threads=4, kmer=31,
+                          gencode=True, force=False, log_file=None,
+                          progress_cb=None):
+        Path(index_dir).mkdir(parents=True, exist_ok=True)
+        (Path(index_dir) / "info.json").write_text("{}")
+        return Path(index_dir)
+
+    with patch.object(ref, "download_file", side_effect=fake_download), \
+         patch.object(ref, "build_salmon_index", side_effect=fake_salmon_index):
+        artifacts = ref.build_reference(
+            release="MTEST", dest_dir=dest, threads=2
+        )
+
+    assert artifacts.n_fasta_transcripts == 3
+    assert artifacts.tx2gene_coverage == pytest.approx(1.0)
 
 
 def test_build_reference_second_run_is_cached(tmp_path: Path):
