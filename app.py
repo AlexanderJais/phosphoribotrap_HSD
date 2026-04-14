@@ -161,12 +161,45 @@ with tabs[0]:
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("Paths")
-        st.text_input("Fastq directory", key="widget_fastq_dir")
-        st.text_input("Salmon index", key="widget_salmon_index")
-        st.text_input("tx2gene TSV (2- or 3-col)", key="widget_tx2gene_tsv")
-        st.text_input("Output directory", key="widget_output_dir")
-        st.text_input("Report/log directory", key="widget_report_dir")
-        st.text_input("Rscript path", key="widget_rscript_path")
+        st.text_input(
+            "Fastq directory",
+            key="widget_fastq_dir",
+            help="Directory containing the raw *_R1_001.fastq.gz / *_R2_001.fastq.gz files.",
+        )
+        st.text_input(
+            "Salmon index (directory)",
+            key="widget_salmon_index",
+            help=(
+                "Directory containing info.json, pos.bin, seq.bin, … — "
+                "the output of `salmon index`. NOT a single file."
+            ),
+        )
+        st.text_input(
+            "tx2gene TSV (file, 2- or 3-col)",
+            key="widget_tx2gene_tsv",
+            help=(
+                "Path to the tx2gene.tsv FILE (transcript_id ⇥ gene_id "
+                "[⇥ gene_name]). NOT the directory containing it."
+            ),
+        )
+        st.text_input(
+            "Output directory",
+            key="widget_output_dir",
+            help="Where salmon quant outputs land (one subdir per sample).",
+        )
+        st.text_input(
+            "Report/log directory",
+            key="widget_report_dir",
+            help="Where fastp reports, rolling logs, and per-sample logs land.",
+        )
+        st.text_input(
+            "Rscript binary (file)",
+            key="widget_rscript_path",
+            help=(
+                "Absolute path to the Rscript executable, or just "
+                "'Rscript' if it's on PATH."
+            ),
+        )
     with col_b:
         st.subheader("Runtime")
         cfg.threads      = int(st.number_input("Threads", min_value=1, max_value=128, value=int(cfg.threads)))
@@ -374,9 +407,9 @@ with tabs[1]:
 
     st.markdown(
         "**What this builds:** GRCm39 transcriptome + genome from a "
-        "GENCODE mouse release, a decoy-aware `salmon index`, and a "
-        "matching `tx2gene.tsv` — the two paths the Config tab needs "
-        "to run the pipeline."
+        "GENCODE mouse release, a decoy-aware `salmon index` "
+        "(a **directory**), and a matching `tx2gene.tsv` (a **file**) — "
+        "the two paths the Config tab needs to run the pipeline."
     )
 
     rcol1, rcol2 = st.columns(2)
