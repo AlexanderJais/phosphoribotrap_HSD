@@ -242,9 +242,20 @@ conda activate phosphotrap
 streamlit run app.py
 ```
 
+> **Heads up — env name vs repo name.** The conda environment is called
+> **`phosphotrap`** (no "ribo"), defined at `environment.yml:1`. The
+> repository is `phosphoribotrap_HSD`. `conda activate phosphoribotrap`
+> will fail with `EnvironmentNameNotFound`; always use
+> `conda activate phosphotrap`.
+
 `environment.yml` installs `fastp`, `salmon`, `r-base`,
 `bioconductor-anota2seq`, `bioconductor-tximport`, and
 `bioconductor-deseq2` alongside the Python stack.
+
+If conda's solver hangs, install [`mamba`](https://mamba.readthedocs.io/)
+(`conda install -n base -c conda-forge mamba`) and run
+`mamba env create -f environment.yml` instead — same result, much
+faster.
 
 ### Pip (Python-only; external tools must already be on `PATH`)
 
@@ -257,6 +268,100 @@ You'll need `fastp`, `salmon`, and `Rscript` + the Bioconductor
 packages available some other way — the Analysis tab's anota2seq /
 DESeq2 buttons will fall back to a clear install hint if they're
 missing, but the primary analysis won't run.
+
+## Reference: building the salmon index + tx2gene (mouse / GRCm39)
+
+The pipeline doesn't ship a salmon index — `salmon_index` and
+`tx2gene_tsv` in `phosphotrap/config.py` are paths you provide. Build
+them once, store them somewhere stable (e.g. `~/refs/salmon/GRCm39/`),
+and point every project at the same directory.
+
+These reads are mouse, so the reference is **GRCm39** (the current
+mouse assembly). Use a **GENCODE** release so transcript IDs match
+between the FASTA and the GTF; `--gencode` at index time strips the
+version suffixes (`ENSMUST00000193812.2` → `ENSMUST00000193812`) so
+`tximport` lines up downstream.
+
+Pick the latest release listed at
+<https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/> (M38 as of
+this writing) and substitute it for `REL` below.
+
+```bash
+# zsh: enable comment lines so this block pastes verbatim
+setopt interactive_comments 2>/dev/null || true
+
+# 0. activate the project env (NOT "phosphoribotrap")
+conda activate phosphotrap
+
+# 1. download GENCODE mouse — pick the current release
+REL=M38
+BASE=https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_${REL}
+
+# macOS ships curl, not wget. -L follows redirects, -O keeps the remote name.
+curl -L -O ${BASE}/gencode.v${REL}.transcripts.fa.gz
+curl -L -O ${BASE}/GRCm39.primary_assembly.genome.fa.gz
+curl -L -O ${BASE}/gencode.v${REL}.primary_assembly.annotation.gtf.gz
+
+# 2. build the decoy list + concatenated reference
+zgrep "^>" GRCm39.primary_assembly.genome.fa.gz \
+    | cut -d ' ' -f1 | sed 's/>//' > decoys.txt
+cat gencode.v${REL}.transcripts.fa.gz GRCm39.primary_assembly.genome.fa.gz \
+    > gentrome.fa.gz
+
+# 3. build the salmon index (~20-40 min, ~15 GB RAM)
+salmon index \
+    -t gentrome.fa.gz \
+    -d decoys.txt \
+    -i salmon_index_gencode_M${REL} \
+    -k 31 \
+    --gencode \
+    -p 8
+
+# 4. build the matching tx2gene.tsv from the same GTF
+zcat gencode.v${REL}.primary_assembly.annotation.gtf.gz \
+  | awk '$3=="transcript"' \
+  | sed -E 's/.*transcript_id "([^"]+)".*gene_id "([^"]+)".*gene_name "([^"]+)".*/\1\t\2\t\3/' \
+  > tx2gene.tsv
+```
+
+After step 2, sanity-check the intermediates:
+
+```bash
+ls -lh decoys.txt gentrome.fa.gz   # ~60 lines, ~810 MB
+head -3 decoys.txt                 # chr1 / chr2 / chr3
+```
+
+In the Streamlit **Config** tab, set:
+
+- **Salmon index** → the absolute path of the `salmon_index_gencode_M38/`
+  **directory** (the one containing `info.json`, `pos.bin`, `seq.bin`,
+  …), not a file inside it.
+- **tx2gene TSV** → the absolute path of `tx2gene.tsv`.
+
+### Things that silently break this
+
+- **Mismatched releases.** Transcriptome FASTA, genome FASTA, and GTF
+  must all come from the same GENCODE release. Mixing M37 transcripts
+  with an M38 GTF will silently drop genes during `tximport`.
+- **GENCODE vs Ensembl.** Both publish GRCm39 and are equivalent, but
+  GENCODE keeps `.N` version suffixes on transcript IDs while Ensembl
+  doesn't. The `--gencode` flag handles this **only** for GENCODE
+  inputs. If you switch to Ensembl, drop `--gencode` and rebuild
+  `tx2gene.tsv` from the Ensembl GTF.
+- **`pc_transcripts.fa.gz` instead of `transcripts.fa.gz`.** The
+  former is protein-coding only — using it makes salmon silently miss
+  every lncRNA / pseudogene in the data. Always grab the plain
+  `gencode.v<REL>.transcripts.fa.gz`.
+- **`primary_assembly` vs `chr_patch_hapl_scaff`.** Use
+  `primary_assembly` for both the genome and the GTF. The patch /
+  haplotype scaffolds inflate the index for no benefit on a standard
+  RNA-seq run. (For mouse M38 the two genome FASTAs happen to be
+  identical, but the convention still matters.)
+- **Pointing the Streamlit field at a file.** Salmon's `-i` argument
+  is a directory. The Config field expects the same.
+
+The index is ~15 GB and reusable across every mouse RNA-seq project.
+You only build it once.
 
 ## Tests
 
