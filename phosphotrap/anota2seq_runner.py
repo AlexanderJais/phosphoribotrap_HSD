@@ -64,10 +64,23 @@ dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
 spec <- jsonlite::fromJSON(spec_path)
 
-tx2g <- read.table(spec$tx2gene, sep = "\t", header = FALSE,
-                   stringsAsFactors = FALSE)
-tx2g <- tx2g[, 1:2]
+tx2g_raw <- read.table(spec$tx2gene, sep = "\t", header = FALSE,
+                       stringsAsFactors = FALSE)
+tx2g <- tx2g_raw[, 1:2]
 colnames(tx2g) <- c("TXNAME", "GENEID")
+
+# Build a gene_id -> gene_name map from the 3rd column (if present)
+# so the output TSVs carry human-readable symbols alongside the
+# Ensembl IDs that tximport aggregates on. Falls back gracefully for
+# legacy 2-column tx2gene files.
+if (ncol(tx2g_raw) >= 3) {
+  gene_name_map <- tapply(
+    tx2g_raw[, 3], tx2g_raw[, 2],
+    function(x) x[!is.na(x) & nzchar(x)][1]
+  )
+} else {
+  gene_name_map <- setNames(character(0), character(0))
+}
 
 ip_files    <- spec$ip_files
 input_files <- spec$input_files
@@ -87,12 +100,17 @@ dataT <- dataT[shared, , drop = FALSE]
 
 phenoVec <- spec$phenoVec
 
+# NB: anota2seq's ``normalize`` is a logical (TRUE/FALSE) flag that
+# controls *whether* to normalize — the *method* goes in
+# ``transformation``. Passing the method name here ("TMM-log") trips
+# anota2seqCheckParameter with "normalize parameter must be set to
+# TRUE or FALSE" and aborts before any analysis runs.
 ads <- anota2seqDataSetFromMatrix(
   dataP     = dataP,
   dataT     = dataT,
   phenoVec  = phenoVec,
   dataType  = "RNAseq",
-  normalize = "TMM-log",
+  normalize = TRUE,
   transformation = "TMM-log",
   filterZeroGenes = TRUE,
   varCutOff = NULL
@@ -125,7 +143,25 @@ dump_one <- function(df, name) {
   } else if (!is.data.frame(df)) {
     df <- as.data.frame(df)
   }
-  df$gene_id <- rownames(df)
+  # tximport aggregates on Ensembl gene_id, so the rownames are
+  # ENSMUSG.../ENSG... — add a ``gene_name`` column joined from the
+  # tx2gene mapping so downstream TSVs carry MGI / HGNC symbols. Put
+  # gene_id + gene_name first for readability.
+  gene_ids <- rownames(df)
+  if (length(gene_ids) > 0) {
+    df$gene_id <- gene_ids
+    if (length(gene_name_map) > 0) {
+      df$gene_name <- unname(gene_name_map[gene_ids])
+      df$gene_name[is.na(df$gene_name)] <- gene_ids[is.na(df$gene_name)]
+    } else {
+      df$gene_name <- gene_ids
+    }
+    lead <- c("gene_id", "gene_name")
+    df <- df[, c(lead, setdiff(colnames(df), lead)), drop = FALSE]
+  } else {
+    df$gene_id <- character(0)
+    df$gene_name <- character(0)
+  }
   path <- file.path(out_dir, paste0(name, ".tsv"))
   write.table(df, file = path, sep = "\t", row.names = FALSE,
               quote = FALSE)

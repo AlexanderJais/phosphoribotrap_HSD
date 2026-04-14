@@ -57,7 +57,12 @@ from phosphotrap.logger import (
     read_log_file,
     tail_log,
 )
-from phosphotrap.pipeline import check_environment, run_pipeline
+from phosphotrap.pipeline import (
+    check_environment,
+    load_pipeline_results,
+    run_pipeline,
+    save_pipeline_results,
+)
 from phosphotrap.reference import (
     DEFAULT_GENCODE_MOUSE_RELEASE,
     GencodeFiles,
@@ -102,7 +107,19 @@ if "cfg" not in st.session_state:
 if "sample_df" not in st.session_state:
     st.session_state.sample_df = default_sample_df()
 if "pipeline_results" not in st.session_state:
-    st.session_state.pipeline_results = []
+    # Rehydrate the last saved pipeline run from disk so users who
+    # restart streamlit (or reopen the browser tab) don't lose the
+    # Pipeline-tab results table. The heavy outputs (fastp / salmon)
+    # already survive in the output dir via skip-if-cached, but the
+    # in-memory StepResult list — what the table renders — was wiped
+    # on every session reset. load_pipeline_results is defensive and
+    # returns [] on any read / schema failure.
+    try:
+        st.session_state.pipeline_results = load_pipeline_results(
+            st.session_state.cfg.effective_report_dir()
+        )
+    except Exception:  # pragma: no cover - defensive
+        st.session_state.pipeline_results = []
 if "log_filter_staged_clear" not in st.session_state:
     st.session_state.log_filter_staged_clear = False
 if "analysis" not in st.session_state:
@@ -946,11 +963,50 @@ with tabs[3]:
                 st.error(f"Pipeline crashed: {exc}")
                 results = []
         st.session_state.pipeline_results = results
+        # Persist the StepResult list so it survives a streamlit restart
+        # or a closed browser tab. save_pipeline_results never raises —
+        # on OSError we log-and-swallow so the pipeline run itself is
+        # still reported as successful to the user.
+        try:
+            if results:
+                save_pipeline_results(results, cfg.effective_report_dir())
+        except OSError as exc:
+            logger.warning("could not persist pipeline results: %s", exc)
         st.success(f"Pipeline complete: {len(results)} step(s)")
+
+    # Manual reload: useful when the user has run the pipeline in a
+    # previous session and wants the table back without re-running.
+    # load_pipeline_results returns [] if nothing has been saved, so
+    # the button is always safe to click.
+    _reload_col, _clear_col = st.columns([1, 3])
+    with _reload_col:
+        if st.button("Reload saved results"):
+            loaded = load_pipeline_results(cfg.effective_report_dir())
+            st.session_state.pipeline_results = loaded
+            if loaded:
+                st.success(
+                    f"Reloaded {len(loaded)} cached pipeline step(s) from "
+                    f"{cfg.effective_report_dir() / 'pipeline_results.json'}"
+                )
+            else:
+                st.info(
+                    "No saved pipeline results found under "
+                    f"{cfg.effective_report_dir()}. Run the pipeline at "
+                    "least once to create the cache."
+                )
 
     if st.session_state.pipeline_results:
         rows = [asdict(r) for r in st.session_state.pipeline_results]
         st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.caption(
+            "Pipeline results are persisted to "
+            f"`{cfg.effective_report_dir() / 'pipeline_results.json'}` "
+            "and rehydrated on the next streamlit startup. The actual "
+            "fastp/salmon outputs are cached under the output directory "
+            "and re-used automatically on the next run thanks to "
+            "skip-if-cached — so continuing into the Analysis tab does "
+            "not recompute the fastq files."
+        )
 
 # ======================================================================
 # ANALYSIS TAB

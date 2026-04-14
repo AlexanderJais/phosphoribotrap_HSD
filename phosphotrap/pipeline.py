@@ -14,12 +14,13 @@ Design notes:
 
 from __future__ import annotations
 
+import json
 import shlex
 import shutil
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -56,6 +57,70 @@ class StepResult:
     ok: bool
     duration_s: float
     message: str
+
+
+# Filename used by ``save_pipeline_results`` / ``load_pipeline_results``
+# to persist the Pipeline-tab results table across Streamlit sessions.
+# The file lives under ``report_dir`` (same place as the pipeline logs)
+# so it moves with the run and is naturally scoped to the user's config.
+PIPELINE_RESULTS_FILENAME = "pipeline_results.json"
+
+
+def save_pipeline_results(results: list[StepResult], report_dir: Path) -> Path:
+    """Persist pipeline StepResults to a JSON file under ``report_dir``.
+
+    Streamlit session_state is wiped when the server restarts or the
+    browser tab is closed, so the Pipeline-tab results table vanishes
+    even though the heavy salmon outputs are still on disk. Dumping the
+    StepResult list next to the per-sample logs lets the app rehydrate
+    the table on the next startup without re-running anything.
+
+    Returns the path it wrote to. Created directories as needed. Raises
+    OSError on write failure — callers are expected to log-and-swallow.
+    """
+    report_dir = Path(report_dir)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    dest = report_dir / PIPELINE_RESULTS_FILENAME
+    payload = {
+        "version": 1,
+        "saved_at": time.time(),
+        "results": [asdict(r) for r in results],
+    }
+    dest.write_text(json.dumps(payload, indent=2))
+    return dest
+
+
+def load_pipeline_results(report_dir: Path) -> list[StepResult]:
+    """Rehydrate a previously-saved pipeline results list.
+
+    Returns an empty list if the JSON file doesn't exist, is unreadable,
+    or has a schema the current code doesn't understand. Never raises —
+    this is called during Streamlit bootstrap and a corrupt cache file
+    should not prevent the app from rendering.
+    """
+    src = Path(report_dir) / PIPELINE_RESULTS_FILENAME
+    if not src.exists():
+        return []
+    try:
+        payload = json.loads(src.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("could not load pipeline results cache %s: %s", src, exc)
+        return []
+    raw = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        return []
+    valid_fields = {f.name for f in fields(StepResult)}
+    out: list[StepResult] = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        try:
+            out.append(StepResult(**{k: row[k] for k in valid_fields if k in row}))
+        except TypeError:
+            # Schema drift from a future version — skip the row rather
+            # than erroring out of the whole load.
+            continue
+    return out
 
 
 # ----------------------------------------------------------------------
