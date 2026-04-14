@@ -11,7 +11,6 @@ import pytest
 from phosphotrap.fpkm import (
     between_group_contrast,
     compute_fpkm,
-    load_tx2gene,
     pair_ratios,
 )
 from phosphotrap.samples import SampleRecord
@@ -38,20 +37,6 @@ def test_compute_fpkm_matches_mortazavi_formula():
     assert fpkm.loc["g2", "s1"] == pytest.approx(4.5e5)
     assert fpkm.loc["g1", "s2"] == pytest.approx(2e5)
     assert fpkm.loc["g2", "s2"] == pytest.approx(4e5)
-
-
-def test_tx2gene_loader_supports_two_and_three_columns(tmp_path: Path):
-    p2 = tmp_path / "tx2g_2.tsv"
-    p2.write_text("tx1\tgeneA\ntx2\tgeneB\n")
-    df2 = load_tx2gene(p2)
-    assert list(df2.columns) == ["tx_id", "gene_id", "symbol"]
-    assert df2["gene_id"].tolist() == ["geneA", "geneB"]
-    assert df2["symbol"].tolist() == ["geneA", "geneB"]  # symbol mirrors gene_id
-
-    p3 = tmp_path / "tx2g_3.tsv"
-    p3.write_text("tx1\tgeneA\tActa1\ntx2\tgeneB\tTnnt1\n")
-    df3 = load_tx2gene(p3)
-    assert df3["symbol"].tolist() == ["Acta1", "Tnnt1"]
 
 
 def _make_records_and_fpkm(n_genes: int = 20):

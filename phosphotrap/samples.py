@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable
 
 import pandas as pd
 

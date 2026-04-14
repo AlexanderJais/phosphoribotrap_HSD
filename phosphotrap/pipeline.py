@@ -14,19 +14,17 @@ Design notes:
 
 from __future__ import annotations
 
-import os
 import shlex
 import shutil
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Optional
 
 from .logger import get_logger
 from .samples import SampleRecord
 
-StepCallback = Callable[[int, int, float, str], None]
 RunCallback = Callable[[int, int, float, str], None]
 
 logger = get_logger()
@@ -278,6 +276,7 @@ def run_pipeline(
     force: bool,
     progress_cb: Optional[RunCallback] = None,
     dry_run: bool = False,
+    rscript_path: str = "Rscript",
 ) -> list[StepResult]:
     """Run fastp (optional) + salmon across the supplied records.
 
@@ -292,7 +291,7 @@ def run_pipeline(
     report_dir.mkdir(parents=True, exist_ok=True)
 
     if dry_run:
-        env = check_environment()
+        env = check_environment(rscript_path)
         logger.info("dry-run environment check: %s", env)
         if progress_cb is not None:
             progress_cb(0, 0, 1.0, "dry run — environment check complete")

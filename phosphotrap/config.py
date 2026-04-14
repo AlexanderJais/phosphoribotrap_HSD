@@ -18,7 +18,24 @@ DEFAULT_CONFIG_PATH = Path("config/phosphotrap.json")
 
 DEFAULT_REFERENCE_GROUP = "NCD"
 DEFAULT_CONTRASTS = ["HSD1_vs_NCD", "HSD3_vs_NCD"]
+# Full enumeration of contrasts the app supports (pre-filtered later
+# by the configured reference group).
 ALL_CONTRASTS = ["HSD1_vs_NCD", "HSD3_vs_NCD", "HSD3_vs_HSD1"]
+
+
+def contrasts_for_reference(ref_group: str, all_groups: tuple[str, ...]) -> list[str]:
+    """Return the canonical contrast list for a given reference group.
+
+    For reference ``NCD`` and groups ``(NCD, HSD1, HSD3)`` this returns
+    ``["HSD1_vs_NCD", "HSD3_vs_NCD", "HSD3_vs_HSD1"]`` — every non-ref
+    group compared to the reference, plus the non-ref ↔ non-ref contrast
+    as an optional extra. Ordering is deterministic.
+    """
+    others = [g for g in all_groups if g != ref_group]
+    contrasts = [f"{g}_vs_{ref_group}" for g in others]
+    if len(others) >= 2:
+        contrasts.append(f"{others[1]}_vs_{others[0]}")
+    return contrasts
 
 # anota2seq thresholds for a chronic stimulus — deliberately loose.
 DEFAULT_DELTA_PT = 0.1
@@ -50,7 +67,6 @@ class AppConfig:
     # Design
     reference_group: str = DEFAULT_REFERENCE_GROUP
     contrasts: list[str] = field(default_factory=lambda: list(DEFAULT_CONTRASTS))
-    chronic_preset: bool = True
 
     # anota2seq thresholds
     anota_delta_pt: float = DEFAULT_DELTA_PT

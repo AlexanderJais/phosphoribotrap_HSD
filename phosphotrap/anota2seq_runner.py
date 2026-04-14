@@ -2,9 +2,18 @@
 
 anota2seq is the primary analysis for this app. Because it's an R
 package, we generate a small Rscript, pass it the contrast-specific
-sample list through environment variables, and parse the three output
-TSVs (translation / buffered / mRNA+translation) from a scratch
-directory per contrast.
+sample list through a JSON spec, and parse the three output TSVs from
+a scratch directory per contrast.
+
+The three output categories are the anota2seq *regulatory modes*
+produced by :func:`anota2seqRegModes` and retrieved via
+``anota2seqGetOutput(ads, output = "regModes", analysis = ...)``:
+
+* ``translation``     — IP changes without a matching INPUT change
+* ``buffering``       — INPUT changes but IP compensates
+* ``mRNA_abundance``  — both IP and INPUT change coherently
+  (this is anota2seq's taxonomy for the "both change" case; the
+  user-facing prompt called it "mRNA+translation" in loose language)
 
 Graceful degradation: every call path that touches R is wrapped in
 ``try/except FileNotFoundError`` so the UI stays up when Rscript, r-base,
@@ -14,13 +23,11 @@ or the Bioconductor packages aren't installed.
 from __future__ import annotations
 
 import json
-import os
 import shlex
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 
@@ -36,9 +43,10 @@ class Anota2seqResult:
     contrast: str
     ok: bool
     message: str
-    translation: pd.DataFrame
-    buffered: pd.DataFrame
-    mrna_translation: pd.DataFrame
+    # Three anota2seq regulatory-mode categories
+    translation: pd.DataFrame     # IP changes, INPUT doesn't
+    buffering: pd.DataFrame       # INPUT changes, IP compensates
+    mrna_abundance: pd.DataFrame  # both change coherently
     scratch_dir: Path
 
 
@@ -89,7 +97,11 @@ ads <- anota2seqDataSetFromMatrix(
   varCutOff = NULL
 )
 
-ads <- anota2seqAnalyze(ads, useRVM = TRUE, analysis = c("translation","buffering","translated mRNA","total mRNA"))
+ads <- anota2seqAnalyze(
+  ads,
+  useRVM   = TRUE,
+  analysis = c("translation", "buffering", "translated mRNA", "total mRNA")
+)
 
 ads <- anota2seqSelSigGenes(
   ads,
@@ -101,6 +113,9 @@ ads <- anota2seqSelSigGenes(
   selContrast         = 1
 )
 
+# anota2seqRegModes partitions genes into translation / buffering /
+# mRNA abundance / background. All three we care about are retrieved
+# via output = "regModes" with the matching analysis label.
 ads <- anota2seqRegModes(ads)
 
 dump_one <- function(df, name) {
@@ -116,24 +131,24 @@ dump_one <- function(df, name) {
 }
 
 translation <- tryCatch(
-  anota2seqGetOutput(ads, analysis = "translation",
-                     output = "selected", getRVM = TRUE, selContrast = 1),
-  error = function(e) NULL
-)
-buffered <- tryCatch(
-  anota2seqGetOutput(ads, analysis = "buffering",
-                     output = "selected", getRVM = TRUE, selContrast = 1),
-  error = function(e) NULL
-)
-mrna_t <- tryCatch(
   anota2seqGetOutput(ads, output = "regModes",
                      analysis = "translation", selContrast = 1),
   error = function(e) NULL
 )
+buffering <- tryCatch(
+  anota2seqGetOutput(ads, output = "regModes",
+                     analysis = "buffering", selContrast = 1),
+  error = function(e) NULL
+)
+mrna_abundance <- tryCatch(
+  anota2seqGetOutput(ads, output = "regModes",
+                     analysis = "mRNA abundance", selContrast = 1),
+  error = function(e) NULL
+)
 
-dump_one(translation, "translation")
-dump_one(buffered,    "buffered")
-dump_one(mrna_t,      "mrna_translation")
+dump_one(translation,    "translation")
+dump_one(buffering,      "buffering")
+dump_one(mrna_abundance, "mrna_abundance")
 
 cat("ok\n")
 """
@@ -200,8 +215,8 @@ def run_anota2seq(
                 f"got {len(contrast_pairs)}. Check sample sheet pairing."
             ),
             translation=pd.DataFrame(),
-            buffered=pd.DataFrame(),
-            mrna_translation=pd.DataFrame(),
+            buffering=pd.DataFrame(),
+            mrna_abundance=pd.DataFrame(),
             scratch_dir=scratch,
         )
 
@@ -233,8 +248,8 @@ def run_anota2seq(
                 "via the conda bootstrap, then set the Rscript path in Config."
             ),
             translation=pd.DataFrame(),
-            buffered=pd.DataFrame(),
-            mrna_translation=pd.DataFrame(),
+            buffering=pd.DataFrame(),
+            mrna_abundance=pd.DataFrame(),
             scratch_dir=scratch,
         )
 
@@ -248,8 +263,8 @@ def run_anota2seq(
             ok=False,
             message=f"anota2seq Rscript failed (rc={proc.returncode}): {tail}",
             translation=pd.DataFrame(),
-            buffered=pd.DataFrame(),
-            mrna_translation=pd.DataFrame(),
+            buffering=pd.DataFrame(),
+            mrna_abundance=pd.DataFrame(),
             scratch_dir=scratch,
         )
 
@@ -268,7 +283,7 @@ def run_anota2seq(
         ok=True,
         message=f"anota2seq complete in {dur:.1f}s",
         translation=_read("translation"),
-        buffered=_read("buffered"),
-        mrna_translation=_read("mrna_translation"),
+        buffering=_read("buffering"),
+        mrna_abundance=_read("mrna_abundance"),
         scratch_dir=scratch,
     )

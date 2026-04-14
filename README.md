@@ -121,14 +121,17 @@ anota2seqSelSigGenes(
 )
 ```
 
-It reports three output categories per contrast:
+It partitions genes into the three anota2seq regulatory modes per
+contrast (retrieved via ``anota2seqGetOutput(ads, output="regModes",
+analysis=...)``):
 
 - **translation** — IP changes without an INPUT change
-- **buffered** — INPUT changes but IP compensates
-- **mRNA+translation** — both change
+- **buffering** — INPUT changes but IP compensates
+- **mRNA abundance** — both change coherently (the "both" category
+  the spec called "mRNA+translation")
 
-All thresholds are adjustable in the Config tab; the "chronic-stimulus
-preset" toggle resets them to the loose defaults above.
+All thresholds are adjustable in the Config tab; the **Apply chronic-
+stimulus preset** button resets them to the loose defaults above.
 
 **Graceful degradation.** If `Rscript`, `r-base`,
 `bioconductor-anota2seq`, or `bioconductor-tximport` aren't installed,
@@ -220,7 +223,7 @@ environment.yml             # conda bootstrap (includes bioconda tools)
    sign-consistency + between-group Mann-Whitney for the selected
    contrast), "Run anota2seq" and "DESeq2 interaction cross-check"
    buttons. Histogram, top-30 bar chart, volcano plot, and separate
-   anota2seq translation/buffered/mRNA+translation tables. Downloads
+   anota2seq translation/buffering/mRNA-abundance tables. Downloads
    everywhere.
 5. **Logs** — live tail of `logs/phosphotrap.log` with substring
    filter. Stitches rolled-over backups so a long run straddling a

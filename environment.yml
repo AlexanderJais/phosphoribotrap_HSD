@@ -15,6 +15,7 @@ dependencies:
   - fastp
   - salmon>=1.10
   - r-base>=4.3
+  - r-jsonlite
   - bioconductor-tximport
-  - bioconductor-anota2seq
+  - bioconductor-anota2seq>=1.22
   - bioconductor-deseq2

@@ -18,7 +18,6 @@ For a 3-group design the meaningful statistics are:
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -32,46 +31,16 @@ try:  # scipy is defensive — the UI must still load without it
 except Exception:  # pragma: no cover - exercised only when scipy missing
     _HAS_SCIPY = False
 
+try:  # false_discovery_control is scipy ≥1.11
+    from scipy.stats import false_discovery_control  # type: ignore
+    _HAS_SCIPY_FDR = True
+except Exception:  # pragma: no cover
+    _HAS_SCIPY_FDR = False
+
 from .logger import get_logger
-from .samples import Pair, SampleRecord, pairs_by_group
+from .samples import SampleRecord, pairs_by_group
 
 logger = get_logger()
-
-
-# ----------------------------------------------------------------------
-# tx2gene loading
-# ----------------------------------------------------------------------
-def load_tx2gene(path: Path) -> pd.DataFrame:
-    """Load a 2- or 3-column tx2gene TSV/CSV.
-
-    The first column is always transcript id, the second gene id. An
-    optional third column is the gene symbol. Tab or comma separated,
-    with or without a header.
-    """
-    p = Path(path)
-    for sep in ("\t", ","):
-        try:
-            df = pd.read_csv(p, sep=sep, header=None, dtype=str, engine="python")
-        except Exception:
-            continue
-        if df.shape[1] >= 2:
-            break
-    else:
-        raise ValueError(f"tx2gene {path} does not look like a 2/3-column table")
-
-    # Strip an optional header row (heuristic: first row is non-numeric).
-    first = df.iloc[0].astype(str).str.lower().tolist()
-    header_markers = {"transcript", "tx", "gene", "symbol", "gene_id", "tx_id"}
-    if any(cell in header_markers for cell in first):
-        df = df.iloc[1:].reset_index(drop=True)
-
-    if df.shape[1] == 2:
-        df.columns = ["tx_id", "gene_id"]
-        df["symbol"] = df["gene_id"]
-    else:
-        df = df.iloc[:, :3]
-        df.columns = ["tx_id", "gene_id", "symbol"]
-    return df
 
 
 # ----------------------------------------------------------------------
@@ -179,9 +148,8 @@ def pair_ratios(
     per_group: dict[str, pd.DataFrame] = {}
     for group, labels in pair_labels.items():
         sub = ratios[labels]
-        # Geometric mean of the ratio = mean of the log2 values, back to linear.
+        # log2(geomean of linear ratio) == arithmetic mean of the log2 values.
         geomean_log2 = sub.mean(axis=1)
-        mean_log2 = sub.mean(axis=1)  # arithmetic mean of log2 == log2(geomean)
         arithmetic = (2.0 ** sub).mean(axis=1)
         median_log2 = sub.median(axis=1)
         n_up = (sub > 0).sum(axis=1)
@@ -287,12 +255,19 @@ def between_group_contrast(
 
 
 def _bh_fdr(pvals: np.ndarray) -> np.ndarray:
+    """Benjamini-Hochberg FDR. Defers to scipy when available."""
     p = np.asarray(pvals, dtype=float)
     n = len(p)
     out = np.full(n, np.nan)
     valid = ~np.isnan(p)
     if not valid.any():
         return out
+
+    if _HAS_SCIPY_FDR:
+        out[valid] = false_discovery_control(p[valid], method="bh")
+        return out
+
+    # Hand-rolled fallback for the scipy-missing path.
     pv = p[valid]
     order = np.argsort(pv)
     ranked = pv[order]

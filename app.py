@@ -23,23 +23,21 @@ import streamlit as st
 
 from phosphotrap.anota2seq_runner import run_anota2seq
 from phosphotrap.config import (
-    ALL_CONTRASTS,
     DEFAULT_CONFIG_PATH,
     AppConfig,
+    contrasts_for_reference,
 )
 from phosphotrap.deseq2_runner import run_deseq2_interaction
 from phosphotrap.fpkm import (
     between_group_contrast,
     load_salmon_matrix,
-    load_tx2gene,
     pair_ratios,
 )
-from phosphotrap.logger import DEFAULT_LOG_DIR, get_logger, tail_log
+from phosphotrap.logger import attach_file_handler, get_logger, tail_log
 from phosphotrap.pipeline import check_environment, run_pipeline
 from phosphotrap.samples import (
     GROUPS,
     default_sample_df,
-    pairs,
     pairs_by_group,
     populate_fastq_paths,
     ready_records,
@@ -47,6 +45,16 @@ from phosphotrap.samples import (
     summary,
     to_records,
 )
+
+# Chronic-stimulus threshold preset — relaxed defaults for the app's
+# "apply preset" button (3-vs-3, mild effect sizes).
+CHRONIC_PRESET = {
+    "anota_delta_pt": 0.1,
+    "anota_delta_tp": 0.1,
+    "anota_max_padj": 0.1,
+    "anota_min_slope_trans": 0.0,
+    "anota_max_slope_trans": 2.0,
+}
 
 logger = get_logger()
 
@@ -79,6 +87,11 @@ if "analysis" not in st.session_state:
 
 cfg: AppConfig = st.session_state.cfg
 disk_cfg: AppConfig = st.session_state.disk_config
+
+# Attach the file handler to the configured report dir. Idempotent, so
+# Streamlit reruns don't stack handlers; if the user changes report_dir
+# and saves, the next rerun rotates the handler onto the new location.
+attach_file_handler(Path(cfg.report_dir) / "logs")
 
 # ----------------------------------------------------------------------
 # Tabs
@@ -125,6 +138,10 @@ with tabs[0]:
 
     st.divider()
     st.subheader("Design")
+
+    # Reference group drives the contrasts list. Changing it resets the
+    # available contrast options; downstream tabs read ``cfg.contrasts``
+    # for whatever the user currently has selected.
     d1, d2 = st.columns(2)
     with d1:
         cfg.reference_group = st.selectbox(
@@ -132,47 +149,62 @@ with tabs[0]:
             options=list(GROUPS),
             index=list(GROUPS).index(cfg.reference_group)
             if cfg.reference_group in GROUPS else 0,
+            help="Contrast strings on downstream tabs are derived from this.",
         )
+        available = contrasts_for_reference(cfg.reference_group, GROUPS)
         cfg.contrasts = st.multiselect(
             "Contrasts",
-            options=ALL_CONTRASTS,
-            default=[c for c in cfg.contrasts if c in ALL_CONTRASTS] or list(ALL_CONTRASTS[:2]),
+            options=available,
+            default=[c for c in cfg.contrasts if c in available] or available[:2],
         )
     with d2:
-        cfg.chronic_preset = st.checkbox(
-            "Chronic-stimulus threshold preset (anota2seq)", value=cfg.chronic_preset,
-            help="Loosens deltaPT/TP, FDR, and slope bounds to favour sensitivity."
+        st.caption(
+            "Chronic-stimulus preset: loose thresholds (deltaPT/TP=0.1, "
+            "maxPAdj=0.1, slopeTrans 0–2) for mild effect sizes and n=3."
         )
-        if cfg.chronic_preset:
-            cfg.anota_delta_pt = 0.1
-            cfg.anota_delta_tp = 0.1
-            cfg.anota_max_padj = 0.1
-            cfg.anota_min_slope_trans = 0.0
-            cfg.anota_max_slope_trans = 2.0
+        if st.button("Apply chronic-stimulus preset"):
+            # Write directly to widget session state so the next render
+            # reflects the preset values regardless of prior user edits.
+            for key, value in CHRONIC_PRESET.items():
+                st.session_state[f"widget_{key}"] = value
+            st.rerun()
+
+    # ------------------------------------------------------------------
+    # anota2seq thresholds. Each number_input has an explicit widget key
+    # so the "Apply preset" button above can rewrite them via
+    # st.session_state *before* the widgets render on the next run.
+    # After the widgets render we copy their live values back into cfg
+    # so diff() and save() see the same thing the user sees.
+    # ------------------------------------------------------------------
+    for _k, _default in (
+        ("anota_delta_pt", cfg.anota_delta_pt),
+        ("anota_delta_tp", cfg.anota_delta_tp),
+        ("anota_max_padj", cfg.anota_max_padj),
+        ("anota_min_slope_trans", cfg.anota_min_slope_trans),
+        ("anota_max_slope_trans", cfg.anota_max_slope_trans),
+        ("min_fpkm", cfg.min_fpkm),
+    ):
+        st.session_state.setdefault(f"widget_{_k}", float(_default))
 
     st.subheader("anota2seq thresholds")
     t1, t2, t3 = st.columns(3)
     with t1:
-        cfg.anota_delta_pt = float(st.number_input(
-            "selDeltaPT", value=float(cfg.anota_delta_pt), step=0.05, format="%.2f"
-        ))
-        cfg.anota_delta_tp = float(st.number_input(
-            "selDeltaTP", value=float(cfg.anota_delta_tp), step=0.05, format="%.2f"
-        ))
+        st.number_input("selDeltaPT", key="widget_anota_delta_pt", step=0.05, format="%.2f")
+        st.number_input("selDeltaTP", key="widget_anota_delta_tp", step=0.05, format="%.2f")
     with t2:
-        cfg.anota_max_padj = float(st.number_input(
-            "maxPAdj", value=float(cfg.anota_max_padj), step=0.01, format="%.2f"
-        ))
-        cfg.min_fpkm = float(st.number_input(
-            "FPKM floor (ratio denom)", value=float(cfg.min_fpkm), step=0.05, format="%.2f"
-        ))
+        st.number_input("maxPAdj", key="widget_anota_max_padj", step=0.01, format="%.2f")
+        st.number_input("FPKM floor (ratio denom)", key="widget_min_fpkm", step=0.05, format="%.2f")
     with t3:
-        cfg.anota_min_slope_trans = float(st.number_input(
-            "minSlopeTranslation", value=float(cfg.anota_min_slope_trans), step=0.1, format="%.2f"
-        ))
-        cfg.anota_max_slope_trans = float(st.number_input(
-            "maxSlopeTranslation", value=float(cfg.anota_max_slope_trans), step=0.1, format="%.2f"
-        ))
+        st.number_input("minSlopeTranslation", key="widget_anota_min_slope_trans", step=0.1, format="%.2f")
+        st.number_input("maxSlopeTranslation", key="widget_anota_max_slope_trans", step=0.1, format="%.2f")
+
+    # Copy widget state back into cfg so save/diff see the live values.
+    cfg.anota_delta_pt        = float(st.session_state["widget_anota_delta_pt"])
+    cfg.anota_delta_tp        = float(st.session_state["widget_anota_delta_tp"])
+    cfg.anota_max_padj        = float(st.session_state["widget_anota_max_padj"])
+    cfg.anota_min_slope_trans = float(st.session_state["widget_anota_min_slope_trans"])
+    cfg.anota_max_slope_trans = float(st.session_state["widget_anota_max_slope_trans"])
+    cfg.min_fpkm              = float(st.session_state["widget_min_fpkm"])
 
     st.divider()
     bcol1, bcol2 = st.columns([1, 1])
@@ -297,6 +329,7 @@ with tabs[2]:
                     force=cfg.force_rerun,
                     progress_cb=cb,
                     dry_run=dry_run,
+                    rscript_path=cfg.rscript_path or "Rscript",
                 )
             except Exception as exc:
                 logger.exception("pipeline crashed")
@@ -315,7 +348,11 @@ with tabs[2]:
 with tabs[3]:
     st.header("Analysis — per contrast")
 
-    available_contrasts = cfg.contrasts or list(ALL_CONTRASTS[:2])
+    # Contrasts are derived from the configured reference group; fall
+    # back to the first two valid options for that reference if the
+    # user hasn't selected anything yet.
+    derived = contrasts_for_reference(cfg.reference_group, GROUPS)
+    available_contrasts = [c for c in cfg.contrasts if c in derived] or derived[:2]
     contrast = st.selectbox(
         "Contrast",
         options=available_contrasts,
@@ -478,25 +515,28 @@ with tabs[3]:
                 x="delta_log2",
                 y="gene_id",
                 orientation="h",
-                title=f"Top 30 by Mann-Whitney p — {contrast}",
+                title=(
+                    f"Top 30 by Mann-Whitney significance — log2 FC shown on x-axis — "
+                    f"{contrast}"
+                ),
             )
             fig2.update_yaxes(autorange="reversed")
             st.plotly_chart(fig2, use_container_width=True)
 
     anota = panel.get("anota2seq")
     if anota is not None and anota.ok:
-        st.subheader(f"anota2seq categories — {contrast}")
+        st.subheader(f"anota2seq regulatory modes — {contrast}")
         st.write(
             f"translation: {len(anota.translation)} · "
-            f"buffered: {len(anota.buffered)} · "
-            f"mRNA+translation: {len(anota.mrna_translation)}"
+            f"buffering: {len(anota.buffering)} · "
+            f"mRNA abundance (both change): {len(anota.mrna_abundance)}"
         )
-        with st.expander("translation", expanded=False):
+        with st.expander("translation (IP changes, INPUT does not)", expanded=False):
             st.dataframe(anota.translation, use_container_width=True)
-        with st.expander("buffered", expanded=False):
-            st.dataframe(anota.buffered, use_container_width=True)
-        with st.expander("mRNA+translation", expanded=False):
-            st.dataframe(anota.mrna_translation, use_container_width=True)
+        with st.expander("buffering (INPUT changes, IP compensates)", expanded=False):
+            st.dataframe(anota.buffering, use_container_width=True)
+        with st.expander("mRNA abundance (both change coherently)", expanded=False):
+            st.dataframe(anota.mrna_abundance, use_container_width=True)
 
     deseq = panel.get("deseq2")
     if deseq is not None and deseq.ok:
@@ -534,7 +574,7 @@ with tabs[4]:
         if st.button("Refresh"):
             st.rerun()
 
-    tail = tail_log(DEFAULT_LOG_DIR, max_lines=800, filter_substr=filter_str)
+    tail = tail_log(Path(cfg.report_dir) / "logs", max_lines=800, filter_substr=filter_str)
     st.code(tail or "(log empty)", language="text")
     st.download_button(
         "Download full log",
