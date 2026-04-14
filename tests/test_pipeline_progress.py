@@ -1,9 +1,17 @@
-"""Smoke test for progress callback monotonicity.
+"""Smoke tests for the pipeline runner.
 
-We mock ``run_fastp`` and ``run_salmon`` so the test does not touch live
-fastq files or the fastp/salmon binaries. What we care about is that the
-composed progress fraction never goes backwards and finishes at 1.0
-after ticking mid-sample at least once.
+Covers:
+
+* progress-callback monotonicity (composed per-sample + per-step)
+* empty-record-list safety
+* ``run_salmon`` post-run existence checks for ``quant.sf`` AND
+  ``quant.genes.sf`` — the latter is the sanity check that catches
+  a silent ``-g <bad_path>`` failure where salmon exits rc=0 without
+  writing the gene-level aggregation (fixed in the HIGH #3 audit
+  follow-up).
+
+We mock the subprocess layer entirely so no fastp / salmon binary is
+needed and the tests run in milliseconds.
 """
 
 from __future__ import annotations
@@ -12,7 +20,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from phosphotrap import pipeline as pipeline_mod
-from phosphotrap.pipeline import StepResult, run_pipeline
+from phosphotrap.pipeline import StepResult, run_pipeline, run_salmon
 from phosphotrap.samples import SampleRecord
 
 
@@ -79,6 +87,139 @@ def test_progress_fractions_are_monotonic_and_reach_one(tmp_path: Path):
     assert fractions[-1] == 1.0
     # At least one mid-sample tick (a value strictly between 0 and 1).
     assert any(0.0 < f < 1.0 for f in fractions)
+
+
+def _one_record() -> SampleRecord:
+    return SampleRecord(
+        ccg_id="ccg1",
+        sample="IP1",
+        comment="",
+        replicate=1,
+        group="NCD",
+        fraction="IP",
+        fastq_r1="/tmp/fake_R1.fastq.gz",
+        fastq_r2="/tmp/fake_R2.fastq.gz",
+    )
+
+
+def test_run_salmon_flags_missing_quant_genes_sf(tmp_path: Path):
+    """HIGH #3 post-fix: quant.genes.sf must exist for ok=True.
+
+    Simulates the silent failure mode where salmon exits rc=0 without
+    writing gene-level aggregation — which is what happens when
+    ``-g <tx2gene>`` points at a directory / empty file / a file with
+    transcript IDs that don't match the salmon index.
+    """
+    rec = _one_record()
+    output_dir = tmp_path / "out"
+    report_dir = tmp_path / "rep"
+
+    # Fake _run_tee: write quant.sf but NOT quant.genes.sf, return rc=0.
+    def fake_run_tee(cmd, log_file, progress_cb=None, total_expected=1.0):
+        quant_dir = output_dir / "salmon" / rec.name()
+        quant_dir.mkdir(parents=True, exist_ok=True)
+        (quant_dir / "quant.sf").write_text("Name\tLength\tEffectiveLength\tTPM\tNumReads\n")
+        # Deliberately do NOT write quant.genes.sf.
+        if progress_cb is not None:
+            progress_cb(1.0)
+        return 0, "fake salmon tail"
+
+    with patch.object(pipeline_mod, "_run_tee", side_effect=fake_run_tee):
+        res = run_salmon(
+            rec,
+            salmon_index=tmp_path / "idx",
+            tx2gene=tmp_path / "tx2g.tsv",
+            output_dir=output_dir,
+            threads=2,
+            libtype="A",
+            force=False,
+            log_file=tmp_path / "log.log",
+            use_trimmed=False,
+            report_dir=report_dir,
+        )
+
+    assert res.ok is False
+    assert res.step == "salmon"
+    assert "quant.genes.sf" in res.message
+    # Error should point the user at the right fix.
+    assert "tx2gene" in res.message.lower() or "Reference tab" in res.message
+
+
+def test_run_salmon_happy_path(tmp_path: Path):
+    """Both quant.sf and quant.genes.sf present -> ok=True."""
+    rec = _one_record()
+    output_dir = tmp_path / "out"
+    report_dir = tmp_path / "rep"
+
+    def fake_run_tee(cmd, log_file, progress_cb=None, total_expected=1.0):
+        quant_dir = output_dir / "salmon" / rec.name()
+        quant_dir.mkdir(parents=True, exist_ok=True)
+        (quant_dir / "quant.sf").write_text("Name\tLength\tEffectiveLength\tTPM\tNumReads\n")
+        (quant_dir / "quant.genes.sf").write_text("Name\tLength\tEffectiveLength\tTPM\tNumReads\n")
+        if progress_cb is not None:
+            progress_cb(1.0)
+        return 0, "fake salmon tail"
+
+    with patch.object(pipeline_mod, "_run_tee", side_effect=fake_run_tee):
+        res = run_salmon(
+            rec,
+            salmon_index=tmp_path / "idx",
+            tx2gene=tmp_path / "tx2g.tsv",
+            output_dir=output_dir,
+            threads=2,
+            libtype="A",
+            force=False,
+            log_file=tmp_path / "log.log",
+            use_trimmed=False,
+            report_dir=report_dir,
+        )
+
+    assert res.ok is True
+    assert res.message == "ok"
+
+
+def test_run_salmon_cache_hit_requires_both_files(tmp_path: Path):
+    """If only quant.sf is cached, we must NOT short-circuit — the
+    pre-existing cache check at the top of run_salmon already enforces
+    this (``quant_sf.exists() and quant_genes_sf.exists()``), but let's
+    pin it down with a test so nobody accidentally relaxes it later."""
+    rec = _one_record()
+    output_dir = tmp_path / "out"
+    report_dir = tmp_path / "rep"
+    quant_dir = output_dir / "salmon" / rec.name()
+    quant_dir.mkdir(parents=True, exist_ok=True)
+    # Only quant.sf pre-exists, no quant.genes.sf.
+    (quant_dir / "quant.sf").write_text("stale")
+
+    # _run_tee should be CALLED (not a cache hit) because quant.genes.sf
+    # is absent. Our fake below re-writes quant.sf but still skips
+    # quant.genes.sf so the post-run check flags it.
+    called = {"n": 0}
+
+    def fake_run_tee(cmd, log_file, progress_cb=None, total_expected=1.0):
+        called["n"] += 1
+        (quant_dir / "quant.sf").write_text("fresh")
+        if progress_cb is not None:
+            progress_cb(1.0)
+        return 0, "fake"
+
+    with patch.object(pipeline_mod, "_run_tee", side_effect=fake_run_tee):
+        res = run_salmon(
+            rec,
+            salmon_index=tmp_path / "idx",
+            tx2gene=tmp_path / "tx2g.tsv",
+            output_dir=output_dir,
+            threads=2,
+            libtype="A",
+            force=False,
+            log_file=tmp_path / "log.log",
+            use_trimmed=False,
+            report_dir=report_dir,
+        )
+
+    assert called["n"] == 1, "cache check must not short-circuit without quant.genes.sf"
+    assert res.ok is False
+    assert "quant.genes.sf" in res.message
 
 
 def test_empty_records_final_callback_has_nonnegative_indices(tmp_path: Path):

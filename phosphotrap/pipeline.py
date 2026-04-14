@@ -259,6 +259,28 @@ def run_salmon(
             "salmon", rec.name(), False, time.time() - start,
             f"salmon produced no quant.sf in {quant_dir}"
         )
+    # ``quant.genes.sf`` is written only when salmon can successfully
+    # read the ``-g <tx2gene>`` file AND map every transcript ID in
+    # the index to a gene. If tx2gene is a directory (the bug that
+    # broke the first live run — see d3b838f), an empty file, or a
+    # file with completely mismatched transcript IDs, salmon may
+    # exit rc=0 and still fail to produce ``quant.genes.sf``.
+    # Without this check, the pipeline reports success and the
+    # Analysis tab fails two tabs later with "No quant.genes.sf"
+    # from ``fpkm._read_quant_genes`` — a confusing error located
+    # far from its actual cause.
+    if not quant_genes_sf.exists():
+        return StepResult(
+            "salmon", rec.name(), False, time.time() - start,
+            (
+                f"salmon wrote quant.sf but NOT quant.genes.sf in "
+                f"{quant_dir}. This usually means the tx2gene.tsv "
+                f"file passed via -g was missing, a directory, "
+                f"empty, or had transcript IDs that don't match the "
+                f"salmon index. Check cfg.tx2gene_tsv in the Config "
+                f"tab and rebuild via the Reference tab if needed."
+            ),
+        )
     return StepResult("salmon", rec.name(), True, time.time() - start, "ok")
 
 
