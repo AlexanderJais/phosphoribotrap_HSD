@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
 import pytest
 
 from phosphotrap import figures as fig_mod
@@ -186,3 +189,144 @@ def test_parse_highlight_text_mixed():
     assert fig_mod.parse_highlight_text(text) == [
         "Gal", "Galp", "Galr1", "Galr2", "Bdnf", "Npy", "Pomc"
     ]
+
+
+# ----------------------------------------------------------------------
+# volcano_plot
+# ----------------------------------------------------------------------
+def _fake_contrast_table(n: int = 200, seed: int = 0) -> pd.DataFrame:
+    """Synthetic contrast table indexed by gene_id.
+
+    Roughly volcano-shaped: centered at 0, a handful of genes out in
+    the tails with small p-values. Columns match what
+    ``phosphotrap.fpkm.ContrastResult.table`` produces.
+    """
+    rng = np.random.default_rng(seed)
+    gene_ids = [f"ENSMUSG{str(i).zfill(11)}" for i in range(n)]
+    delta = rng.normal(0, 1.0, size=n)
+    p = rng.uniform(0, 1, size=n)
+    # Force a few genes into the "significant" zone.
+    delta[:5] = [2.5, -2.2, 1.9, -1.8, 3.0]
+    p[:5] = [1e-4, 1e-3, 5e-3, 2e-3, 7e-5]
+    padj = np.clip(p * 2, 0, 1)
+    df = pd.DataFrame(
+        {
+            "mean_log2_alt": delta + 0.1,
+            "mean_log2_ref": 0.1,
+            "delta_log2": delta,
+            "mannwhitney_p": p,
+            "mannwhitney_padj": padj,
+        },
+        index=gene_ids,
+    )
+    df.index.name = "gene_id"
+    return df
+
+
+def test_volcano_plot_returns_figure_with_four_trace_layers():
+    df = _fake_contrast_table()
+    primary = {df.index[0]: "Gal", df.index[1]: "Galp"}
+    secondary = {df.index[2]: "Bdnf"}
+    fig = fig_mod.volcano_plot(
+        df,
+        title="HSD1_vs_NCD",
+        highlight_primary=primary,
+        highlight_secondary=secondary,
+        alpha=0.1,
+    )
+    assert isinstance(fig, go.Figure)
+    # Exactly 4 layers: background, significant, primary, secondary.
+    assert len(fig.data) == 4
+    trace_names = [t.name for t in fig.data]
+    assert "all genes" in trace_names
+    assert any("padj" in n for n in trace_names)
+    assert "Galanin signaling" in trace_names
+    assert "Custom highlights" in trace_names
+
+
+def test_volcano_plot_title_in_layout():
+    df = _fake_contrast_table()
+    fig = fig_mod.volcano_plot(df, title="HSD3_vs_NCD")
+    # Plotly wraps string titles in a dict when we set font via theme.
+    assert fig.layout.title.text == "HSD3_vs_NCD"
+
+
+def test_volcano_plot_highlight_trace_uses_labels_as_text():
+    df = _fake_contrast_table()
+    primary = {df.index[0]: "Gal", df.index[1]: "Galp"}
+    fig = fig_mod.volcano_plot(
+        df, title="C", highlight_primary=primary
+    )
+    galanin_traces = [t for t in fig.data if t.name == "Galanin signaling"]
+    assert len(galanin_traces) == 1
+    trace = galanin_traces[0]
+    assert "markers+text" in trace.mode
+    assert list(trace.text) == ["Gal", "Galp"]
+
+
+def test_volcano_plot_primary_color_override():
+    df = _fake_contrast_table()
+    primary = {df.index[0]: "Gal"}
+    fig = fig_mod.volcano_plot(
+        df,
+        title="C",
+        highlight_primary=primary,
+        primary_color="#00aa00",
+    )
+    galanin_traces = [t for t in fig.data if t.name == "Galanin signaling"]
+    assert galanin_traces[0].marker.color == "#00aa00"
+
+
+def test_volcano_plot_empty_table_returns_placeholder_figure():
+    fig = fig_mod.volcano_plot(pd.DataFrame(), title="empty")
+    assert isinstance(fig, go.Figure)
+    # Should carry the "No contrast data loaded." annotation.
+    annotations = fig.layout.annotations or ()
+    assert any(
+        "No contrast data loaded" in (a.text or "") for a in annotations
+    )
+
+
+def test_volcano_plot_skips_unknown_highlight_ids():
+    """A gene_id in the highlight dict that isn't in the table is a no-op."""
+    df = _fake_contrast_table()
+    primary = {
+        df.index[0]: "Gal",
+        "ENSMUSG_NOT_IN_TABLE": "Ghost",
+    }
+    fig = fig_mod.volcano_plot(
+        df, title="C", highlight_primary=primary, highlight_secondary=None
+    )
+    galanin_traces = [t for t in fig.data if t.name == "Galanin signaling"]
+    assert len(galanin_traces) == 1
+    # Only one valid highlight point drawn.
+    assert len(galanin_traces[0].x) == 1
+    assert list(galanin_traces[0].text) == ["Gal"]
+
+
+def test_volcano_plot_font_size_propagates_to_layout():
+    df = _fake_contrast_table()
+    fig = fig_mod.volcano_plot(df, title="C", font_size=20)
+    assert fig.layout.font.size == 20
+
+
+def test_volcano_plot_handles_missing_padj_column():
+    df = _fake_contrast_table().drop(columns=["mannwhitney_padj"])
+    fig = fig_mod.volcano_plot(df, title="C", alpha=0.1)
+    # With padj missing, nothing qualifies as "significant" except
+    # explicitly via the threshold comparison which is all-NaN -> False.
+    # We should still get the background trace and NO sig trace points.
+    assert isinstance(fig, go.Figure)
+    sig_traces = [t for t in fig.data if t.name and "padj" in t.name]
+    assert len(sig_traces) == 1
+    assert len(sig_traces[0].x) == 0
+
+
+def test_neg_log10_handles_zero_and_negative():
+    s = pd.Series([0.001, 0.0, -1, np.nan, 1.0])
+    out = fig_mod._neg_log10(s)
+    assert pytest.approx(out[0], abs=1e-9) == 3.0
+    assert np.isnan(out[1])
+    assert np.isnan(out[2])
+    assert np.isnan(out[3])
+    assert pytest.approx(out[4], abs=1e-9) == 0.0
