@@ -97,10 +97,10 @@ disk_cfg: AppConfig = st.session_state.disk_config
 # attach_file_handler itself is defensive — if the requested directory
 # can't be created (PermissionError, empty string, read-only FS) it
 # falls back to DEFAULT_LOG_DIR and logs a warning rather than
-# crashing the app. Users can always navigate back to the Config tab
-# to fix a typo instead of being locked out.
-_report_dir = (cfg.report_dir or "").strip() or AppConfig().report_dir
-attach_file_handler(Path(_report_dir) / "logs")
+# crashing the app. ``cfg.effective_report_dir()`` additionally
+# coerces blank / ``"."`` user input back to the dataclass default
+# so a cleared text input doesn't silently create ``logs/`` in cwd.
+attach_file_handler(cfg.effective_report_dir() / "logs")
 
 # Sample records are derived from st.session_state.sample_df and used
 # by every tab. Compute once per rerun rather than 5+ times scattered
@@ -372,8 +372,8 @@ with tabs[2]:
                     selected,
                     salmon_index=Path(cfg.salmon_index),
                     tx2gene=Path(cfg.tx2gene_tsv),
-                    output_dir=Path(cfg.output_dir),
-                    report_dir=Path(cfg.report_dir),
+                    output_dir=cfg.effective_output_dir(),
+                    report_dir=cfg.effective_report_dir(),
                     threads=cfg.threads,
                     run_fastp_step=cfg.run_fastp,
                     libtype=cfg.salmon_libtype,
@@ -414,7 +414,7 @@ with tabs[3]:
     if st.button("Load salmon quant outputs"):
         try:
             result = load_salmon_matrix(
-                ready_samples, Path(cfg.output_dir) / "salmon"
+                ready_samples, cfg.effective_output_dir() / "salmon"
             )
             st.session_state.salmon_matrices = {
                 "counts": result.counts,
@@ -478,10 +478,10 @@ with tabs[3]:
                 ready_samples,
                 alt_group=alt_group,
                 ref_group=ref_group,
-                salmon_root=Path(cfg.output_dir) / "salmon",
+                salmon_root=cfg.effective_output_dir() / "salmon",
                 tx2gene=Path(cfg.tx2gene_tsv),
                 cfg=cfg,
-                output_dir=Path(cfg.output_dir),
+                output_dir=cfg.effective_output_dir(),
             )
         st.session_state.analysis.setdefault(contrast, {})
         st.session_state.analysis[contrast]["anota2seq"] = res
@@ -501,10 +501,10 @@ with tabs[3]:
                 ready_samples,
                 alt_group=alt_group,
                 ref_group=ref_group,
-                salmon_root=Path(cfg.output_dir) / "salmon",
+                salmon_root=cfg.effective_output_dir() / "salmon",
                 tx2gene=Path(cfg.tx2gene_tsv),
                 cfg=cfg,
-                output_dir=Path(cfg.output_dir),
+                output_dir=cfg.effective_output_dir(),
             )
         st.session_state.analysis.setdefault(contrast, {})
         st.session_state.analysis[contrast]["deseq2"] = res
@@ -640,7 +640,7 @@ with tabs[4]:
         "activity. Showing up to 800 matching lines across rolled-over backups."
     )
 
-    log_dir = Path(cfg.report_dir) / "logs"
+    log_dir = cfg.effective_report_dir() / "logs"
     tail = tail_log(log_dir, max_lines=800, filter_substr=filter_str)
     st.code(tail or "(log empty)", language="text")
 

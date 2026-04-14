@@ -7,7 +7,9 @@ from pathlib import Path
 
 from phosphotrap.config import (
     DEFAULT_CONTRASTS,
+    DEFAULT_OUTPUT_DIR,
     DEFAULT_REFERENCE_GROUP,
+    DEFAULT_REPORT_DIR,
     AppConfig,
     contrasts_for_reference,
     is_safe_contrast,
@@ -174,3 +176,46 @@ def test_resolve_rscript_returns_configured_value():
 def test_resolve_rscript_empty_falls_back_to_path_lookup():
     cfg = AppConfig(rscript_path="")
     assert resolve_rscript(cfg) == "Rscript"
+
+
+# ----------------------------------------------------------------------
+# effective_output_dir / effective_report_dir:
+# guard against an empty / "." path field silently flowing through
+# Path(cfg.output_dir) and scattering output/salmon/ into cwd.
+# ----------------------------------------------------------------------
+def test_effective_output_dir_empty_falls_back_to_default():
+    cfg = AppConfig(output_dir="")
+    assert cfg.effective_output_dir() == Path(DEFAULT_OUTPUT_DIR)
+
+
+def test_effective_output_dir_whitespace_falls_back_to_default():
+    cfg = AppConfig(output_dir="   ")
+    assert cfg.effective_output_dir() == Path(DEFAULT_OUTPUT_DIR)
+
+
+def test_effective_output_dir_dot_falls_back_to_default():
+    """'.' resolves to cwd via Path — treat it as 'blank' so the
+    user doesn't accidentally pollute wherever streamlit was launched.
+    """
+    cfg = AppConfig(output_dir=".")
+    assert cfg.effective_output_dir() == Path(DEFAULT_OUTPUT_DIR)
+
+
+def test_effective_output_dir_honours_explicit_path():
+    cfg = AppConfig(output_dir="/tmp/phosphotrap_out")
+    assert cfg.effective_output_dir() == Path("/tmp/phosphotrap_out")
+
+
+def test_effective_output_dir_strips_surrounding_whitespace():
+    cfg = AppConfig(output_dir="  /tmp/phosphotrap_out  ")
+    assert cfg.effective_output_dir() == Path("/tmp/phosphotrap_out")
+
+
+def test_effective_report_dir_empty_falls_back_to_default():
+    cfg = AppConfig(report_dir="")
+    assert cfg.effective_report_dir() == Path(DEFAULT_REPORT_DIR)
+
+
+def test_effective_report_dir_honours_explicit_path():
+    cfg = AppConfig(report_dir="/var/log/phosphotrap")
+    assert cfg.effective_report_dir() == Path("/var/log/phosphotrap")

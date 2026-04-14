@@ -23,6 +23,31 @@ DEFAULT_CONTRASTS = ["HSD1_vs_NCD", "HSD3_vs_NCD"]
 # by the configured reference group).
 ALL_CONTRASTS = ["HSD1_vs_NCD", "HSD3_vs_NCD", "HSD3_vs_HSD1"]
 
+# Defaults for the path fields that flow into the filesystem. Declared
+# at module level so the dataclass defaults and the ``effective_*``
+# helper methods (which coerce blank user input) share a single
+# source of truth.
+DEFAULT_OUTPUT_DIR = "output"
+DEFAULT_REPORT_DIR = "output/reports"
+DEFAULT_RSCRIPT = "Rscript"
+
+# Strings that should be coerced to the dataclass default rather than
+# used literally. ``""`` and ``"."`` both resolve to the cwd via
+# :class:`pathlib.Path`, which would silently scatter ``logs/`` /
+# ``output/salmon/`` into whatever directory streamlit was launched
+# from. Users who genuinely want cwd can pass an absolute path.
+_BLANK_PATH_SENTINELS = {"", "."}
+
+
+def _coerce_blank_path(value: str, default: str) -> str:
+    """Return ``default`` when ``value`` is blank or ``"."``, else ``value``."""
+    if value is None:
+        return default
+    stripped = str(value).strip()
+    if stripped in _BLANK_PATH_SENTINELS:
+        return default
+    return stripped
+
 # Safe-token regex used to validate any user-editable string that ends
 # up in a filesystem path. ``reference_group`` flows into the scratch
 # dir name for anota2seq/DESeq2, so a JSON-edited config with
@@ -97,9 +122,9 @@ class AppConfig:
     fastq_dir: str = ""
     salmon_index: str = ""
     tx2gene_tsv: str = ""
-    output_dir: str = "output"
-    report_dir: str = "output/reports"
-    rscript_path: str = "Rscript"
+    output_dir: str = DEFAULT_OUTPUT_DIR
+    report_dir: str = DEFAULT_REPORT_DIR
+    rscript_path: str = DEFAULT_RSCRIPT
 
     # Runtime
     threads: int = 8
@@ -182,6 +207,24 @@ class AppConfig:
         a = asdict(self)
         b = asdict(other)
         return {k: (a[k], b[k]) for k in a if a[k] != b[k]}
+
+    # ------------------------------------------------------------------
+    # Effective path getters
+    #
+    # The raw ``output_dir`` / ``report_dir`` fields are whatever the
+    # user currently has in the Config tab's text inputs, including an
+    # empty string (if they backspaced the field clear) or ``.`` (the
+    # degenerate cwd alias). Every code path that flows these into a
+    # filesystem path should go through these helpers instead of
+    # ``Path(cfg.output_dir)`` directly, so a blank field doesn't
+    # silently scatter ``output/salmon/`` or ``logs/`` into whatever
+    # directory streamlit happened to be launched from.
+    # ------------------------------------------------------------------
+    def effective_output_dir(self) -> Path:
+        return Path(_coerce_blank_path(self.output_dir, DEFAULT_OUTPUT_DIR))
+
+    def effective_report_dir(self) -> Path:
+        return Path(_coerce_blank_path(self.report_dir, DEFAULT_REPORT_DIR))
 
 
 # Sentinel: the supplied value cannot be coerced to the target type.
