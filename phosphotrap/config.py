@@ -10,6 +10,7 @@ widgets.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Optional, get_args, get_origin
@@ -21,6 +22,24 @@ DEFAULT_CONTRASTS = ["HSD1_vs_NCD", "HSD3_vs_NCD"]
 # Full enumeration of contrasts the app supports (pre-filtered later
 # by the configured reference group).
 ALL_CONTRASTS = ["HSD1_vs_NCD", "HSD3_vs_NCD", "HSD3_vs_HSD1"]
+
+# Safe-token regex used to validate any user-editable string that ends
+# up in a filesystem path. ``reference_group`` flows into the scratch
+# dir name for anota2seq/DESeq2, so a JSON-edited config with
+# ``"../evil"`` would escape the output directory. ``samples.py`` uses
+# the same regex for the data-editor's group/fraction/ccg_id cells, so
+# this constant is the single source of truth.
+_SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+# A valid contrast is two safe tokens joined by ``_vs_``.
+_CONTRAST_RE = re.compile(r"^[A-Za-z0-9_\-]+_vs_[A-Za-z0-9_\-]+$")
+
+
+def is_safe_token(value: str) -> bool:
+    return bool(value) and _SAFE_TOKEN_RE.fullmatch(value) is not None
+
+
+def is_safe_contrast(value: str) -> bool:
+    return bool(value) and _CONTRAST_RE.fullmatch(value) is not None
 
 
 def contrasts_for_reference(ref_group: str, all_groups: tuple[str, ...]) -> list[str]:
@@ -122,6 +141,25 @@ class AppConfig:
                 # Leave the field at its default.
                 continue
             kwargs[f.name] = coerced
+
+        # Domain validation for fields that flow into filesystem paths.
+        # ``reference_group`` becomes part of the anota2seq scratch dir
+        # name via ``contrasts_for_reference``, and each contrast
+        # string becomes a directory on disk. Reject anything that
+        # isn't a safe token / safe contrast string and fall back to
+        # the field's default — do not silently propagate a
+        # path-traversal-capable value downstream.
+        ref = kwargs.get("reference_group")
+        if ref is not None and not is_safe_token(ref):
+            kwargs.pop("reference_group")
+        contrasts = kwargs.get("contrasts")
+        if contrasts is not None:
+            clean = [c for c in contrasts if is_safe_contrast(c)]
+            if clean:
+                kwargs["contrasts"] = clean
+            else:
+                kwargs.pop("contrasts")
+
         try:
             return cls(**kwargs)
         except TypeError:

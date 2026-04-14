@@ -18,6 +18,7 @@ from typing import Iterable
 
 import pandas as pd
 
+from .config import is_safe_token
 from .logger import get_logger
 
 logger = get_logger()
@@ -29,17 +30,6 @@ FRACTIONS = ("IP", "INPUT")
 FASTQ_RE = re.compile(
     r"^A006200122_(?P<ccg>\d+)_S(?P<s>\d+)_L002_R(?P<r>[12])_001\.fastq\.gz$"
 )
-
-# Safe-token regex used to validate any user-editable string that ends
-# up in a filesystem path (group, fraction). SampleRecord.name() builds
-# output directory names from these columns, so an unvalidated ``../``
-# in a data_editor cell could escape output_dir. Only alnum + underscore
-# + hyphen permitted.
-_SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
-
-
-def _is_safe_token(value: str) -> bool:
-    return bool(value) and _SAFE_TOKEN_RE.fullmatch(value) is not None
 
 
 @dataclass
@@ -134,17 +124,17 @@ def to_records(df: pd.DataFrame) -> list[SampleRecord]:
 
         fraction = frac if frac in FRACTIONS else "IP"
 
-        if not _is_safe_token(ccg):
+        if not is_safe_token(ccg):
             logger.warning(
                 "sample row %s dropped: ccg_id %r is not a safe token", idx, ccg
             )
             continue
-        if not _is_safe_token(group):
+        if not is_safe_token(group):
             logger.warning(
                 "sample row %s dropped: group %r is not a safe token", idx, group
             )
             continue
-        if not _is_safe_token(fraction):
+        if not is_safe_token(fraction):
             logger.warning(
                 "sample row %s dropped: fraction %r is not a safe token", idx, fraction
             )

@@ -7,8 +7,11 @@ from pathlib import Path
 
 from phosphotrap.config import (
     DEFAULT_CONTRASTS,
+    DEFAULT_REFERENCE_GROUP,
     AppConfig,
     contrasts_for_reference,
+    is_safe_contrast,
+    is_safe_token,
     reconcile_contrasts,
 )
 
@@ -90,3 +93,73 @@ def test_reconcile_contrasts_returns_empty_when_nothing_survives():
 
 def test_reconcile_contrasts_empty_current_is_noop():
     assert reconcile_contrasts([], ["HSD1_vs_NCD", "HSD3_vs_NCD"]) == []
+
+
+# ----------------------------------------------------------------------
+# Safe-token + contrast validation, and config-load path-traversal guard
+# ----------------------------------------------------------------------
+def test_is_safe_token_allows_alnum_underscore_hyphen():
+    assert is_safe_token("NCD")
+    assert is_safe_token("HSD1")
+    assert is_safe_token("group-1")
+    assert is_safe_token("group_1")
+
+
+def test_is_safe_token_rejects_path_traversal_and_whitespace():
+    assert not is_safe_token("")
+    assert not is_safe_token("../evil")
+    assert not is_safe_token("HSD 1")
+    assert not is_safe_token("HSD/1")
+    assert not is_safe_token("HSD\x001")
+    assert not is_safe_token(".")
+
+
+def test_is_safe_contrast_requires_vs_separator():
+    assert is_safe_contrast("HSD1_vs_NCD")
+    assert is_safe_contrast("alt-1_vs_ref-2")
+    assert not is_safe_contrast("HSD1vs_NCD")   # missing underscore prefix
+    assert not is_safe_contrast("_vs_NCD")      # empty alt
+    assert not is_safe_contrast("HSD1_vs_")     # empty ref
+    assert not is_safe_contrast("HSD1_vs_../evil")
+    assert not is_safe_contrast("HSD1 _vs_ NCD")
+
+
+def test_load_rejects_path_traversal_reference_group(tmp_path: Path):
+    """A JSON-edited config with a malicious reference_group must not
+    propagate the dangerous value. It should fall back to the default.
+    """
+    p = tmp_path / "phosphotrap.json"
+    p.write_text(json.dumps({
+        "reference_group": "../evil",
+        "contrasts": ["HSD1_vs_NCD", "HSD3_vs_NCD"],
+    }))
+    cfg = AppConfig.load(p)
+    assert cfg.reference_group == DEFAULT_REFERENCE_GROUP
+    # Valid contrasts still survive.
+    assert cfg.contrasts == ["HSD1_vs_NCD", "HSD3_vs_NCD"]
+
+
+def test_load_drops_malicious_contrasts_keeps_valid_ones(tmp_path: Path):
+    p = tmp_path / "phosphotrap.json"
+    p.write_text(json.dumps({
+        "reference_group": "NCD",
+        "contrasts": [
+            "HSD1_vs_NCD",      # valid
+            "HSD1_vs_../evil",  # path traversal
+            "rm -rf /",         # junk
+            "HSD3_vs_NCD",      # valid
+        ],
+    }))
+    cfg = AppConfig.load(p)
+    assert cfg.contrasts == ["HSD1_vs_NCD", "HSD3_vs_NCD"]
+
+
+def test_load_all_bad_contrasts_falls_through_to_default(tmp_path: Path):
+    p = tmp_path / "phosphotrap.json"
+    p.write_text(json.dumps({
+        # None of these match ^[safe]_vs_[safe]$: path traversal, no
+        # "_vs_" separator at all, whitespace.
+        "contrasts": ["../evil", "rm_rf_slash", "HSD1 vs NCD"],
+    }))
+    cfg = AppConfig.load(p)
+    assert cfg.contrasts == list(DEFAULT_CONTRASTS)

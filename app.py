@@ -107,14 +107,10 @@ tabs = st.tabs(["Config", "Samples", "Pipeline", "Analysis", "Logs"])
 with tabs[0]:
     st.header("Configuration")
 
-    unsaved = cfg.diff(disk_cfg)
-    if unsaved:
-        st.warning(
-            f"Unsaved changes vs. {DEFAULT_CONFIG_PATH}: "
-            + ", ".join(sorted(unsaved.keys()))
-        )
-    else:
-        st.success(f"Config in sync with {DEFAULT_CONFIG_PATH}")
+    # The unsaved-changes indicator is rendered at the *end* of this
+    # tab, after every widget has written its live value back into
+    # cfg. Rendering it at the top would show state from the previous
+    # rerun — always one step behind whatever the user sees on screen.
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -225,6 +221,19 @@ with tabs[0]:
     cfg.min_fpkm              = float(st.session_state["widget_min_fpkm"])
 
     st.divider()
+
+    # Diff is computed here, at the end of the tab, so it reflects the
+    # live widget values the user has just edited — not the state from
+    # the previous rerun.
+    unsaved = cfg.diff(disk_cfg)
+    if unsaved:
+        st.warning(
+            f"Unsaved changes vs. {DEFAULT_CONFIG_PATH}: "
+            + ", ".join(sorted(unsaved.keys()))
+        )
+    else:
+        st.success(f"Config in sync with {DEFAULT_CONFIG_PATH}")
+
     bcol1, bcol2 = st.columns([1, 1])
     with bcol1:
         if st.button("Save config", type="primary"):
@@ -602,11 +611,28 @@ with tabs[4]:
         "activity. Showing up to 800 matching lines across rolled-over backups."
     )
 
-    tail = tail_log(Path(cfg.report_dir) / "logs", max_lines=800, filter_substr=filter_str)
+    log_dir = Path(cfg.report_dir) / "logs"
+    tail = tail_log(log_dir, max_lines=800, filter_substr=filter_str)
     st.code(tail or "(log empty)", language="text")
-    st.download_button(
-        "Download full log",
-        data=tail,
-        file_name="phosphotrap.log",
-        mime="text/plain",
-    )
+
+    dcol1, dcol2 = st.columns(2)
+    with dcol1:
+        st.download_button(
+            "Download current view",
+            data=tail,
+            file_name="phosphotrap_view.log",
+            mime="text/plain",
+            help="Exports exactly what's shown above (filtered and tailed).",
+        )
+    with dcol2:
+        # Fetch unfiltered, uncapped content for the full-log button so
+        # the label is honest — the previous version silently downloaded
+        # whatever the filter was showing.
+        full_log = tail_log(log_dir, max_lines=10**9, filter_substr="")
+        st.download_button(
+            "Download full log",
+            data=full_log,
+            file_name="phosphotrap.log",
+            mime="text/plain",
+            help="Exports the entire rolling log, stitched across backups.",
+        )
