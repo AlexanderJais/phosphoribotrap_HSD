@@ -163,6 +163,112 @@ def load_gene_symbol_map(tx2gene_path: Path) -> dict[str, str]:
     return out
 
 
+def load_gene_id_to_name_map(tx2gene_path: Path) -> dict[str, str]:
+    """Build a ``{gene_id: gene_name}`` map from a 3-column tx2gene TSV.
+
+    The canonical 3-column tx2gene format is ``transcript_id <TAB>
+    gene_id <TAB> gene_name``. Multiple transcripts per gene collapse
+    to the same gene_id row — the first non-empty gene_name encountered
+    wins (deterministic because the file is processed top-to-bottom).
+
+    For the older 2-column format (no symbol column) the returned map
+    is empty; callers should treat an empty map as "fall back to
+    printing gene_ids" rather than raising.
+
+    Raises :class:`FileNotFoundError` if the path doesn't exist. Silently
+    skips malformed rows. Compared to :func:`load_gene_symbol_map`, this
+    helper keys the map on gene_id (instead of lowercased symbol) so it
+    can be used to *augment* analysis tables that carry Ensembl IDs in
+    their index or in a ``gene_id`` column before those tables are
+    written to TSV on the Analysis / Figures tabs.
+    """
+    path = Path(tx2gene_path)
+    if not path.exists():
+        raise FileNotFoundError(f"tx2gene TSV not found: {path}")
+
+    out: dict[str, str] = {}
+    with path.open("r") as fh:
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 3:
+                continue
+            _tid, gene_id, gene_symbol = parts[0], parts[1], parts[2]
+            if not gene_id or not gene_symbol:
+                continue
+            out.setdefault(gene_id, gene_symbol)
+    return out
+
+
+def prepend_gene_name(
+    df: pd.DataFrame,
+    id_to_name: dict[str, str],
+    *,
+    id_col: Optional[str] = None,
+) -> pd.DataFrame:
+    """Return a copy of ``df`` with a ``gene_name`` column inserted.
+
+    Exported analysis tables carry Ensembl gene_ids (the canonical key
+    for everything downstream of tximport), but humans can't read
+    ``ENSMUSG00000034855`` at a glance. This helper adds a ``gene_name``
+    column right after the identifier column so every TSV the app
+    downloads is instantly readable without a second lookup.
+
+    Two input shapes:
+
+    * ``id_col=None`` (default) — the DataFrame is indexed by gene_id.
+      A two-column prefix ``gene_id, gene_name`` is produced by
+      resetting the index, and the returned DataFrame has a fresh
+      RangeIndex. This is the common case for ``ContrastResult.table``
+      and ``load_salmon_matrix(...).fpkm``.
+    * ``id_col="gene_id"`` (or any column name) — the DataFrame already
+      carries a column of gene_ids; ``gene_name`` is inserted directly
+      after that column and the existing index is preserved. This is
+      the common case for ``DESeq2Result.table``, which writes
+      ``gene_id`` as the first column of its own TSV.
+
+    When a gene_id is absent from ``id_to_name``, the fallback is the
+    gene_id itself (so a missing symbol never silently becomes an
+    empty cell — the row is still identifiable). If the input
+    DataFrame is empty, the returned frame is a copy with an added
+    ``gene_name`` column of the correct dtype.
+    """
+    if df is None:
+        return pd.DataFrame({"gene_name": []})
+
+    if id_col is None:
+        out = df.reset_index()
+        # The old index becomes the first column. Normalise its name
+        # to ``gene_id`` so downstream consumers get a stable schema
+        # regardless of whether the input was ``index.name = "gene_id"``
+        # or unnamed.
+        if out.columns[0] != "gene_id":
+            out = out.rename(columns={out.columns[0]: "gene_id"})
+        id_series = out["gene_id"].astype(str)
+        names = id_series.map(id_to_name).fillna(id_series)
+        out.insert(1, "gene_name", names)
+        return out
+
+    if id_col not in df.columns:
+        raise KeyError(
+            f"prepend_gene_name: id_col={id_col!r} not in DataFrame columns "
+            f"{list(df.columns)!r}"
+        )
+    out = df.copy()
+    id_series = out[id_col].astype(str)
+    names = id_series.map(id_to_name).fillna(id_series)
+    insert_at = out.columns.get_loc(id_col) + 1
+    # Drop any pre-existing gene_name column to avoid ``cannot insert
+    # column, already exists`` from pandas. We always take the fresh
+    # mapping as authoritative.
+    if "gene_name" in out.columns:
+        out = out.drop(columns=["gene_name"])
+        # Recompute insertion point — dropping a prior gene_name column
+        # may shift the id_col index if it was after it.
+        insert_at = out.columns.get_loc(id_col) + 1
+    out.insert(insert_at, "gene_name", names)
+    return out
+
+
 def resolve_symbols(
     symbols: Iterable[str],
     symbol_map: dict[str, str],

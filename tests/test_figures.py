@@ -107,6 +107,162 @@ def test_load_gene_symbol_map_missing_file_raises(tmp_path: Path):
 
 
 # ----------------------------------------------------------------------
+# load_gene_id_to_name_map
+# ----------------------------------------------------------------------
+def test_load_gene_id_to_name_map_three_column(tmp_path: Path):
+    """Happy path: 3-column tx2gene with multiple transcripts per gene
+    collapses to a deterministic ``{gene_id: gene_name}`` map.
+    """
+    tx2 = tmp_path / "tx2gene.tsv"
+    tx2.write_text(
+        "\n".join(
+            [
+                "ENSMUST_GAL_1\tENSMUSG_GAL\tGal",
+                "ENSMUST_GAL_2\tENSMUSG_GAL\tGal",
+                "ENSMUST_BDNF\tENSMUSG_BDNF\tBdnf",
+                "ENSMUST_PCSK1\tENSMUSG_PCSK1\tPcsk1n",
+            ]
+        )
+        + "\n"
+    )
+    m = fig_mod.load_gene_id_to_name_map(tx2)
+    assert m == {
+        "ENSMUSG_GAL": "Gal",
+        "ENSMUSG_BDNF": "Bdnf",
+        "ENSMUSG_PCSK1": "Pcsk1n",
+    }
+
+
+def test_load_gene_id_to_name_map_two_column_returns_empty(tmp_path: Path):
+    """Legacy 2-column tx2gene has no symbol — the map is empty and
+    the caller is expected to fall back to plain gene_ids.
+    """
+    tx2 = tmp_path / "tx2gene.tsv"
+    tx2.write_text("ENSMUST_GAL_1\tENSMUSG_GAL\n")
+    assert fig_mod.load_gene_id_to_name_map(tx2) == {}
+
+
+def test_load_gene_id_to_name_map_skips_malformed_rows(tmp_path: Path):
+    """Rows missing gene_id or gene_symbol are silently dropped so
+    one corrupt line doesn't torch the whole map.
+    """
+    tx2 = tmp_path / "tx2gene.tsv"
+    tx2.write_text(
+        "\n".join(
+            [
+                "ENSMUST_GAL\tENSMUSG_GAL\tGal",
+                "ENSMUST_EMPTY\t\tEmptyId",
+                "ENSMUST_EMPTY2\tENSMUSG_X\t",
+                "ENSMUST_BDNF\tENSMUSG_BDNF\tBdnf",
+            ]
+        )
+        + "\n"
+    )
+    assert fig_mod.load_gene_id_to_name_map(tx2) == {
+        "ENSMUSG_GAL": "Gal",
+        "ENSMUSG_BDNF": "Bdnf",
+    }
+
+
+def test_load_gene_id_to_name_map_missing_file_raises(tmp_path: Path):
+    with pytest.raises(FileNotFoundError):
+        fig_mod.load_gene_id_to_name_map(tmp_path / "nope.tsv")
+
+
+# ----------------------------------------------------------------------
+# prepend_gene_name
+# ----------------------------------------------------------------------
+def test_prepend_gene_name_from_index():
+    """Default behaviour: DataFrame indexed by gene_id. The helper
+    resets the index and inserts ``gene_name`` as column 1."""
+    df = pd.DataFrame(
+        {"delta_log2": [1.0, -2.0, 0.5]},
+        index=pd.Index(
+            ["ENSMUSG_GAL", "ENSMUSG_BDNF", "ENSMUSG_UNKNOWN"],
+            name="gene_id",
+        ),
+    )
+    id_to_name = {"ENSMUSG_GAL": "Gal", "ENSMUSG_BDNF": "Bdnf"}
+    out = fig_mod.prepend_gene_name(df, id_to_name)
+    assert list(out.columns) == ["gene_id", "gene_name", "delta_log2"]
+    assert out["gene_id"].tolist() == [
+        "ENSMUSG_GAL", "ENSMUSG_BDNF", "ENSMUSG_UNKNOWN",
+    ]
+    # Unmapped gene_ids fall back to the gene_id itself so no row is
+    # ever silently anonymised to an empty string.
+    assert out["gene_name"].tolist() == ["Gal", "Bdnf", "ENSMUSG_UNKNOWN"]
+
+
+def test_prepend_gene_name_from_unnamed_index():
+    """An unnamed index still gets normalised to ``gene_id`` in the
+    output schema."""
+    df = pd.DataFrame(
+        {"score": [1.0, 2.0]},
+        index=["ENSMUSG_GAL", "ENSMUSG_BDNF"],
+    )
+    out = fig_mod.prepend_gene_name(df, {"ENSMUSG_GAL": "Gal"})
+    assert list(out.columns)[:2] == ["gene_id", "gene_name"]
+    assert out["gene_id"].tolist() == ["ENSMUSG_GAL", "ENSMUSG_BDNF"]
+
+
+def test_prepend_gene_name_from_column():
+    """``id_col`` variant: DataFrame already has a gene_id column,
+    insertion goes right after it and preserves the existing index."""
+    df = pd.DataFrame(
+        {
+            "gene_id": ["ENSMUSG_GAL", "ENSMUSG_BDNF"],
+            "log2FoldChange": [1.5, -0.5],
+            "padj": [0.01, 0.2],
+        }
+    )
+    out = fig_mod.prepend_gene_name(
+        df, {"ENSMUSG_GAL": "Gal", "ENSMUSG_BDNF": "Bdnf"}, id_col="gene_id"
+    )
+    assert list(out.columns) == [
+        "gene_id", "gene_name", "log2FoldChange", "padj"
+    ]
+    assert out["gene_name"].tolist() == ["Gal", "Bdnf"]
+
+
+def test_prepend_gene_name_overwrites_existing_gene_name_column():
+    """If the DataFrame already has a stale ``gene_name`` column
+    (e.g. from a previous augmentation pass), the fresh map wins —
+    no duplicate-column error from pandas."""
+    df = pd.DataFrame(
+        {
+            "gene_id": ["ENSMUSG_GAL"],
+            "gene_name": ["OldName"],
+            "value": [1.0],
+        }
+    )
+    out = fig_mod.prepend_gene_name(
+        df, {"ENSMUSG_GAL": "Gal"}, id_col="gene_id"
+    )
+    assert out["gene_name"].tolist() == ["Gal"]
+    # Only one gene_name column.
+    assert list(out.columns).count("gene_name") == 1
+
+
+def test_prepend_gene_name_from_column_missing_col_raises():
+    df = pd.DataFrame({"other": [1]})
+    with pytest.raises(KeyError, match="id_col='gene_id'"):
+        fig_mod.prepend_gene_name(df, {}, id_col="gene_id")
+
+
+def test_prepend_gene_name_empty_dataframe():
+    """Empty input returns a frame with the gene_name column added,
+    not a crash. Download buttons in the UI sometimes fire against
+    empty cached tables during a partial-analysis state."""
+    df = pd.DataFrame(
+        {"delta_log2": []},
+        index=pd.Index([], name="gene_id"),
+    )
+    out = fig_mod.prepend_gene_name(df, {})
+    assert "gene_name" in out.columns
+    assert len(out) == 0
+
+
+# ----------------------------------------------------------------------
 # resolve_symbols
 # ----------------------------------------------------------------------
 def test_resolve_symbols_happy_path():

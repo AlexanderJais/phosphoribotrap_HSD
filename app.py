@@ -40,9 +40,11 @@ from phosphotrap.figures import (
     GO_DEFAULT_TAXON,
     fetch_go_term_genes,
     figure_export_bytes,
+    load_gene_id_to_name_map,
     load_gene_symbol_map,
     parse_highlight_text,
     per_gene_strip,
+    prepend_gene_name,
     regmode_classification,
     resolve_symbols,
     volcano_plot,
@@ -152,6 +154,41 @@ def _cached_symbol_map(tx2gene_path: str, mtime: float) -> dict[str, str]:
     rebuilds the reference and writes a new tx2gene.tsv.
     """
     return load_gene_symbol_map(Path(tx2gene_path))
+
+
+@st.cache_data(show_spinner=False)
+def _cached_id_to_name_map(tx2gene_path: str, mtime: float) -> dict[str, str]:
+    """Cached ``{gene_id: gene_name}`` map for exportable-file
+    augmentation.
+
+    Same caching rationale as :func:`_cached_symbol_map` — the tx2gene
+    TSV is ~278 k rows on GENCODE mouse M38 and reparsing it on every
+    Streamlit rerun would make the Analysis-tab download buttons feel
+    sluggish. Invalidated by the tx2gene mtime so a Reference-tab
+    rebuild automatically refreshes this map on the next rerun.
+    """
+    return load_gene_id_to_name_map(Path(tx2gene_path))
+
+
+def _load_id_to_name_or_empty(tx2gene_path: str) -> dict[str, str]:
+    """Defensive wrapper: load the ``{gene_id: gene_name}`` map or
+    return ``{}`` on any failure.
+
+    Download buttons must never raise — an inaccessible tx2gene should
+    degrade the Analysis-tab exports to carrying only gene_ids (with
+    a warning), not crash the tab. This helper centralises the
+    try/except so every download site doesn't need its own boilerplate.
+    """
+    if not tx2gene_path:
+        return {}
+    try:
+        path = Path(tx2gene_path)
+        if not path.exists():
+            return {}
+        return _cached_id_to_name_map(str(path), path.stat().st_mtime)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("could not build gene_id -> gene_name map: %s", exc)
+        return {}
 
 
 def _figure_download_row(fig, basename: str) -> None:
@@ -1056,13 +1093,34 @@ with tabs[4]:
             logger.exception("load_salmon_matrix crashed")
             st.error(f"Failed to load salmon output: {exc}")
 
+    # Gene_id -> gene_name map used to augment every exportable table
+    # on this tab. Loaded once per Streamlit rerun via an st.cache_data
+    # wrapper so reopening the tab doesn't reparse the ~278 k-row
+    # tx2gene TSV. Degrades to an empty dict (+ gene_id fallback) if
+    # the tx2gene path is unset, missing, or 2-column — download
+    # buttons still work, they just can't add gene_name.
+    _id_to_name = _load_id_to_name_or_empty(cfg.tx2gene_tsv)
+    if not _id_to_name and cfg.tx2gene_tsv:
+        st.caption(
+            "ℹ️ Gene-symbol annotation unavailable: tx2gene.tsv has no "
+            "third column, or the path is missing. Downloaded tables "
+            "will carry only Ensembl ``gene_id`` strings. Rebuild the "
+            "reference from the Reference tab to get a 3-column "
+            "tx2gene with gene names."
+        )
+
     matrices = st.session_state.get("salmon_matrices")
     if matrices and not matrices["fpkm"].empty:
         st.subheader("FPKM preview (top 20 rows)")
         st.dataframe(matrices["fpkm"].head(20), use_container_width=True)
+        # Augment the FPKM matrix with a gene_name column before
+        # download so the TSV is human-readable without a second
+        # lookup. Preview above deliberately stays in the wide
+        # numeric-only layout to keep the UI fast for big matrices.
+        _fpkm_export = prepend_gene_name(matrices["fpkm"], _id_to_name)
         st.download_button(
             "Download FPKM TSV",
-            data=matrices["fpkm"].to_csv(sep="\t"),
+            data=_fpkm_export.to_csv(sep="\t", index=False),
             file_name="phosphotrap_fpkm.tsv",
             mime="text/tab-separated-values",
         )
@@ -1159,17 +1217,47 @@ with tabs[4]:
     if cr is not None and not cr.table.empty:
         st.subheader(f"Between-group Mann-Whitney — {contrast}")
         st.dataframe(cr.table.head(200), use_container_width=True)
+        # Full MW table with gene_name injected as the second column.
+        _mw_export = prepend_gene_name(cr.table, _id_to_name)
         st.download_button(
             f"Download full table ({contrast})",
-            data=cr.table.to_csv(sep="\t"),
+            data=_mw_export.to_csv(sep="\t", index=False),
             file_name=f"mannwhitney_{contrast}.tsv",
             mime="text/tab-separated-values",
         )
+        # Preranked GSEA .rnk is strictly 2-column (identifier, score)
+        # so we can't just append gene_name. Instead we emit the
+        # gene_name as the identifier — that's what GSEA wants when
+        # the gene set collection (MSigDB etc.) is keyed on symbol —
+        # falling back to gene_id for any gene lacking a symbol.
+        # Deduplication keeps the first occurrence per symbol, which
+        # preserves the significance-ordered sort.
+        _ranked_export = cr.ranked.copy()
+        if _id_to_name:
+            _ranked_export["identifier"] = (
+                _ranked_export["gene_id"]
+                .astype(str)
+                .map(_id_to_name)
+                .fillna(_ranked_export["gene_id"].astype(str))
+            )
+            _ranked_export = _ranked_export.drop_duplicates(
+                subset="identifier", keep="first"
+            )
+            _ranked_export = _ranked_export[["identifier", "score"]]
+        else:
+            _ranked_export = _ranked_export[["gene_id", "score"]]
         st.download_button(
             f"Download preranked (.rnk) ({contrast})",
-            data=cr.ranked.to_csv(sep="\t", index=False, header=False),
+            data=_ranked_export.to_csv(sep="\t", index=False, header=False),
             file_name=f"preranked_{contrast}.rnk",
             mime="text/tab-separated-values",
+            help=(
+                "GSEA preranked format: gene symbol (falls back to "
+                "Ensembl gene_id when no symbol is available), tab, "
+                "score. Duplicate symbols are deduplicated in "
+                "significance-sorted order so the most-significant "
+                "row wins."
+            ),
         )
         try:
             t = cr.table.copy()
@@ -1228,20 +1316,73 @@ with tabs[4]:
             f"buffering: {len(anota.buffering)} · "
             f"mRNA abundance (both change): {len(anota.mrna_abundance)}"
         )
+        # The anota2seq R runner already emits gene_name as the second
+        # column of each regmode TSV (see phosphotrap/anota2seq_runner.py
+        # dump_one). We still run them through prepend_gene_name as a
+        # belt-and-braces measure: it overwrites any stale gene_name
+        # column with the fresh tx2gene map, so switching references
+        # between runs doesn't leave mislabeled downloads. If the
+        # regmode table doesn't have a ``gene_id`` column at all
+        # (shouldn't happen in practice), the branch falls back to
+        # dumping the raw table so the download button still works.
+        def _augmented_anota(df: pd.DataFrame) -> pd.DataFrame:
+            if df is None or df.empty or "gene_id" not in df.columns:
+                return df if df is not None else pd.DataFrame()
+            return prepend_gene_name(df, _id_to_name, id_col="gene_id")
+
         with st.expander("translation (IP changes, INPUT does not)", expanded=False):
             st.dataframe(anota.translation, use_container_width=True)
+            if not anota.translation.empty:
+                st.download_button(
+                    f"Download translation ({contrast})",
+                    data=_augmented_anota(anota.translation).to_csv(
+                        sep="\t", index=False
+                    ),
+                    file_name=f"anota2seq_translation_{contrast}.tsv",
+                    mime="text/tab-separated-values",
+                    key=f"anota_translation_dl_{contrast}",
+                )
         with st.expander("buffering (INPUT changes, IP compensates)", expanded=False):
             st.dataframe(anota.buffering, use_container_width=True)
+            if not anota.buffering.empty:
+                st.download_button(
+                    f"Download buffering ({contrast})",
+                    data=_augmented_anota(anota.buffering).to_csv(
+                        sep="\t", index=False
+                    ),
+                    file_name=f"anota2seq_buffering_{contrast}.tsv",
+                    mime="text/tab-separated-values",
+                    key=f"anota_buffering_dl_{contrast}",
+                )
         with st.expander("mRNA abundance (both change coherently)", expanded=False):
             st.dataframe(anota.mrna_abundance, use_container_width=True)
+            if not anota.mrna_abundance.empty:
+                st.download_button(
+                    f"Download mRNA abundance ({contrast})",
+                    data=_augmented_anota(anota.mrna_abundance).to_csv(
+                        sep="\t", index=False
+                    ),
+                    file_name=f"anota2seq_mrna_abundance_{contrast}.tsv",
+                    mime="text/tab-separated-values",
+                    key=f"anota_mrna_dl_{contrast}",
+                )
 
     deseq = panel.get("deseq2")
     if deseq is not None and deseq.ok:
         st.subheader(f"DESeq2 interaction cross-check — {contrast}")
         st.dataframe(deseq.table.head(200), use_container_width=True)
+        # DESeq2 table already carries ``gene_id`` as its first column
+        # (see deseq2_runner.py RSCRIPT_TEMPLATE). Insert gene_name
+        # right after it for readable downloads.
+        if "gene_id" in deseq.table.columns:
+            _deseq_export = prepend_gene_name(
+                deseq.table, _id_to_name, id_col="gene_id"
+            )
+        else:
+            _deseq_export = deseq.table
         st.download_button(
             f"Download DESeq2 interaction ({contrast})",
-            data=deseq.table.to_csv(sep="\t", index=False),
+            data=_deseq_export.to_csv(sep="\t", index=False),
             file_name=f"deseq2_interaction_{contrast}.tsv",
             mime="text/tab-separated-values",
         )
