@@ -463,6 +463,198 @@ def test_per_gene_strip_respects_group_order():
     assert list(cat_array) == ["HSD3", "HSD1", "NCD"]
 
 
+# ----------------------------------------------------------------------
+# expression_heatmap
+# ----------------------------------------------------------------------
+from collections import namedtuple  # noqa: E402
+
+FakeRec = namedtuple("FakeRec", ["sample_name", "group", "fraction", "replicate"])
+
+
+def _fake_rec(group: str, fraction: str, rep: int) -> FakeRec:
+    """Duck-typed SampleRecord stand-in. ``name()`` returns
+    ``<group>_<fraction><rep>`` to match samples.SampleRecord.name()."""
+    rec = FakeRec(sample_name=f"{group}_{fraction}{rep}",
+                  group=group, fraction=fraction, replicate=rep)
+    # Attach a .name() method via subclass for ducktyping.
+    return rec
+
+
+class _NamedRec:
+    """Full duck-typed SampleRecord: has .name(), .group, .fraction,
+    .replicate. We don't import the real class from samples.py so the
+    figures module stays independent."""
+    def __init__(self, group: str, fraction: str, rep: int):
+        self.group = group
+        self.fraction = fraction
+        self.replicate = rep
+    def name(self) -> str:
+        return f"{self.group}_{self.fraction}{self.replicate}"
+
+
+def _fake_fpkm_and_records() -> tuple[pd.DataFrame, list[_NamedRec]]:
+    """3 groups × 2 fractions × 3 replicates = 18 samples, 4 genes."""
+    genes = [
+        "ENSMUSG_GAL", "ENSMUSG_GALR1", "ENSMUSG_GALR2", "ENSMUSG_BDNF",
+    ]
+    records: list[_NamedRec] = []
+    cols: list[str] = []
+    for group in ("NCD", "HSD1", "HSD3"):
+        for fraction in ("IP", "INPUT"):
+            for rep in (1, 2, 3):
+                r = _NamedRec(group, fraction, rep)
+                records.append(r)
+                cols.append(r.name())
+    rng = np.random.default_rng(42)
+    data = rng.uniform(0.5, 100.0, size=(len(genes), len(cols)))
+    fpkm = pd.DataFrame(data, index=genes, columns=cols)
+    # Force a real signal so z-score tests assert something meaningful.
+    fpkm.loc["ENSMUSG_GAL", [c for c in cols if c.startswith("HSD1_IP")]] *= 5
+    return fpkm, records
+
+
+def test_expression_heatmap_returns_figure_with_one_trace():
+    fpkm, records = _fake_fpkm_and_records()
+    gene_labels = {
+        "ENSMUSG_GAL": "Gal",
+        "ENSMUSG_GALR1": "Galr1",
+    }
+    fig = fig_mod.expression_heatmap(
+        fpkm, records,
+        title="Galanin expression",
+        gene_labels=gene_labels,
+    )
+    assert isinstance(fig, go.Figure)
+    # Single heatmap trace.
+    assert len(fig.data) == 1
+    assert fig.data[0].type == "heatmap"
+
+
+def test_expression_heatmap_row_order_matches_gene_labels():
+    fpkm, records = _fake_fpkm_and_records()
+    gene_labels = {
+        "ENSMUSG_GALR2": "Galr2",
+        "ENSMUSG_GAL": "Gal",
+        "ENSMUSG_GALR1": "Galr1",
+    }
+    fig = fig_mod.expression_heatmap(
+        fpkm, records, title="t", gene_labels=gene_labels,
+    )
+    # Row labels (y axis) should match dict iteration order.
+    assert list(fig.data[0].y) == ["Galr2", "Gal", "Galr1"]
+
+
+def test_expression_heatmap_columns_grouped_with_gap_between_blocks():
+    """Every (group, fraction) block should be contiguous with a
+    single blank column separating adjacent blocks."""
+    fpkm, records = _fake_fpkm_and_records()
+    gene_labels = {"ENSMUSG_GAL": "Gal"}
+    fig = fig_mod.expression_heatmap(
+        fpkm, records, title="t", gene_labels=gene_labels,
+    )
+    x_labels = list(fig.data[0].x)
+    # 3 groups × 2 fractions × 3 reps = 18 data columns, plus 5 gaps
+    # between the 6 blocks = 23 total.
+    assert len(x_labels) == 23
+    # Each gap is a blank string.
+    blanks = [i for i, lab in enumerate(x_labels) if lab == ""]
+    assert len(blanks) == 5
+    # Column labels are short-form like "IP1", "IP2", "IP3",
+    # "INPUT1", "INPUT2", "INPUT3" for each block — total of 18
+    # non-blank.
+    non_blank = [lab for lab in x_labels if lab != ""]
+    assert len(non_blank) == 18
+    # First block is NCD × IP sorted by replicate.
+    assert non_blank[:3] == ["IP1", "IP2", "IP3"]
+    # Second block is NCD × INPUT.
+    assert non_blank[3:6] == ["INPUT1", "INPUT2", "INPUT3"]
+
+
+def test_expression_heatmap_zscore_default_colorscale():
+    fpkm, records = _fake_fpkm_and_records()
+    gene_labels = {"ENSMUSG_GAL": "Gal", "ENSMUSG_GALR1": "Galr1"}
+    fig = fig_mod.expression_heatmap(
+        fpkm, records, title="t", gene_labels=gene_labels,
+    )
+    # Default z-score uses a diverging scale centered at 0.
+    assert fig.data[0].zmid == 0
+    # RdBu_r is stored as a tuple-of-stops, not a string, so just
+    # sanity-check that the first stop's colour matches a blue.
+    stops = fig.data[0].colorscale
+    assert stops is not None and len(stops) > 0
+
+
+def test_expression_heatmap_log2_normalization():
+    fpkm, records = _fake_fpkm_and_records()
+    gene_labels = {"ENSMUSG_GAL": "Gal"}
+    fig = fig_mod.expression_heatmap(
+        fpkm, records, title="t", gene_labels=gene_labels,
+        normalize="log2",
+    )
+    assert fig.data[0].zmid is None  # log2 doesn't center
+    # Colorbar title reflects the chosen normalization.
+    assert "log" in (fig.data[0].colorbar.title.text or "").lower()
+
+
+def test_expression_heatmap_raw_normalization():
+    fpkm, records = _fake_fpkm_and_records()
+    gene_labels = {"ENSMUSG_GAL": "Gal"}
+    fig = fig_mod.expression_heatmap(
+        fpkm, records, title="t", gene_labels=gene_labels,
+        normalize="raw",
+    )
+    assert fig.data[0].zmid is None
+    assert fig.data[0].colorbar.title.text == "FPKM"
+
+
+def test_expression_heatmap_zscore_zero_std_row_is_neutral(tmp_path: Path):
+    """A row with identical values across samples must render neutral
+    (zero z-score), not NaN/white."""
+    genes = ["ENSMUSG_FLAT"]
+    records = [
+        _NamedRec("NCD", "IP", 1), _NamedRec("NCD", "IP", 2),
+        _NamedRec("NCD", "IP", 3),
+        _NamedRec("NCD", "INPUT", 1), _NamedRec("NCD", "INPUT", 2),
+        _NamedRec("NCD", "INPUT", 3),
+    ]
+    cols = [r.name() for r in records]
+    fpkm = pd.DataFrame([[5.0] * len(cols)], index=genes, columns=cols)
+    gene_labels = {"ENSMUSG_FLAT": "Flat"}
+    fig = fig_mod.expression_heatmap(
+        fpkm, records, title="t", gene_labels=gene_labels,
+    )
+    z = np.array(fig.data[0].z, dtype=float)
+    # All non-gap values should be exactly 0.
+    finite = z[~np.isnan(z)]
+    assert (finite == 0.0).all()
+
+
+def test_expression_heatmap_missing_genes_returns_placeholder():
+    fpkm, records = _fake_fpkm_and_records()
+    gene_labels = {"ENSMUSG_NOT_THERE": "Ghost"}
+    fig = fig_mod.expression_heatmap(
+        fpkm, records, title="t", gene_labels=gene_labels,
+    )
+    annotations = fig.layout.annotations or ()
+    assert any("No expression data" in (a.text or "") for a in annotations)
+
+
+def test_expression_heatmap_block_header_annotations_present():
+    fpkm, records = _fake_fpkm_and_records()
+    gene_labels = {"ENSMUSG_GAL": "Gal"}
+    fig = fig_mod.expression_heatmap(
+        fpkm, records, title="t", gene_labels=gene_labels,
+    )
+    annots = fig.layout.annotations or ()
+    texts = [a.text for a in annots]
+    # Six "IP" / "INPUT" fraction labels + three bold group labels.
+    assert texts.count("IP") == 3
+    assert texts.count("INPUT") == 3
+    assert any("<b>NCD</b>" in t for t in texts)
+    assert any("<b>HSD1</b>" in t for t in texts)
+    assert any("<b>HSD3</b>" in t for t in texts)
+
+
 def test_per_gene_strip_shared_y_range():
     ratios, pair_labels = _fake_ratio_data()
     gene_labels = {

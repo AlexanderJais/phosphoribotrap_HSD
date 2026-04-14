@@ -200,6 +200,288 @@ def resolve_symbols(
 
 
 # ----------------------------------------------------------------------
+# Expression heatmap
+# ----------------------------------------------------------------------
+def _zscore_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Row-wise z-score with zero-std rows left at zero (not NaN).
+
+    Rows whose std is zero (a gene expressed identically across every
+    sample) would otherwise produce NaN, which plotly renders as
+    white and breaks the colour scale. Replace them with zero so
+    they render as a neutral stripe.
+    """
+    mean = df.mean(axis=1)
+    std = df.std(axis=1, ddof=0)
+    # Avoid division by zero; zero-std rows stay at zero.
+    std_safe = std.replace(0, np.nan)
+    z = df.sub(mean, axis=0).div(std_safe, axis=0)
+    return z.fillna(0.0)
+
+
+def expression_heatmap(
+    fpkm: pd.DataFrame,
+    records: Iterable,
+    *,
+    title: str,
+    gene_labels: dict[str, str],
+    font_size: int = DEFAULT_FONT_SIZE,
+    normalize: str = "zscore",
+    group_order: Optional[list[str]] = None,
+    fraction_order: Optional[list[str]] = None,
+) -> go.Figure:
+    """Expression heatmap of ``gene_labels`` genes × samples, grouped.
+
+    Column order is ``(group, fraction, replicate)``: every sample
+    belonging to a given ``group × fraction`` block sits contiguously,
+    with a single-column visual gap between blocks so the reader sees
+    the structure without squinting. The gap is implemented as a NaN
+    column (plotly renders NaN as white) — simpler than stitching
+    together multiple subplot heatmaps and produces the same visual.
+
+    ``records`` is duck-typed to :class:`phosphotrap.samples.SampleRecord`:
+    each entry must expose ``.name()``, ``.group``, ``.fraction``, and
+    ``.replicate``. Tests pass simple namedtuples with the same shape
+    so this module doesn't force a concrete samples.py import on the
+    test suite.
+
+    ``normalize``:
+
+    * ``"zscore"`` (default) — row-wise z-score, RdBu_r diverging
+      colour scale centered at zero. The right call when the question
+      is "which samples deviate from the row mean" — i.e. the
+      biological condition effect within each gene.
+    * ``"log2"`` — ``log2(fpkm + 1)`` with Viridis. The right call
+      when the question is "how much is this gene expressed overall".
+    * ``"raw"`` — FPKM values as-is with Viridis. For inspection;
+      skews toward a few high-expression genes dominating the scale.
+
+    Returns a placeholder figure with a centered annotation when no
+    requested gene appears in ``fpkm``.
+    """
+    gene_ids = [g for g in gene_labels if g in fpkm.index]
+    if not gene_ids:
+        fig = go.Figure()
+        fig.update_layout(
+            **_theme_with_title(font_size, title),
+            annotations=[
+                {
+                    "text": "No expression data for the requested genes.",
+                    "showarrow": False,
+                    "font": {"size": font_size},
+                    "xref": "paper",
+                    "yref": "paper",
+                    "x": 0.5,
+                    "y": 0.5,
+                }
+            ],
+        )
+        return fig
+
+    # Build the ordered column list from the records. We don't rely
+    # on ``fpkm`` column ordering because it may be whatever the
+    # pipeline happened to load.
+    records_list = list(records)
+    groups = list(group_order) if group_order else _unique_preserve(
+        r.group for r in records_list
+    )
+    fractions = list(fraction_order) if fraction_order else ["IP", "INPUT"]
+
+    ordered_columns: list[str] = []
+    column_labels: list[str] = []
+    blocks: list[tuple[str, str, list[str]]] = []
+
+    for group in groups:
+        for fraction in fractions:
+            block_recs = sorted(
+                (
+                    r for r in records_list
+                    if r.group == group
+                    and r.fraction == fraction
+                    and r.name() in fpkm.columns
+                ),
+                key=lambda r: r.replicate,
+            )
+            block_cols = [r.name() for r in block_recs]
+            if not block_cols:
+                continue
+            if ordered_columns:
+                # Visual gap: one NaN column between blocks. The
+                # column name is a unique sentinel so plotly doesn't
+                # deduplicate adjacent gaps.
+                gap_name = f"__gap_{len(ordered_columns)}__"
+                ordered_columns.append(gap_name)
+                column_labels.append("")
+            ordered_columns.extend(block_cols)
+            # Short-form column labels like "IP1", "INPUT5" — the
+            # group is implied by the block's position in the
+            # figure-level annotations below.
+            column_labels.extend(
+                f"{r.fraction}{r.replicate}" for r in block_recs
+            )
+            blocks.append((group, fraction, block_cols))
+
+    if not ordered_columns:
+        fig = go.Figure()
+        fig.update_layout(
+            **_theme_with_title(font_size, title),
+            annotations=[
+                {
+                    "text": "No samples matched the expected groups/fractions.",
+                    "showarrow": False,
+                    "font": {"size": font_size},
+                    "xref": "paper",
+                    "yref": "paper",
+                    "x": 0.5,
+                    "y": 0.5,
+                }
+            ],
+        )
+        return fig
+
+    # Build the value matrix in gene × column order.
+    gene_symbols = [gene_labels[g] for g in gene_ids]
+    value_frame = pd.DataFrame(
+        index=gene_ids, columns=ordered_columns, dtype=float
+    )
+    for col in ordered_columns:
+        if col.startswith("__gap_"):
+            value_frame[col] = np.nan
+        else:
+            value_frame[col] = fpkm.loc[gene_ids, col].astype(float).values
+
+    if normalize == "zscore":
+        real_cols = [c for c in ordered_columns if not c.startswith("__gap_")]
+        real = value_frame[real_cols]
+        z = _zscore_rows(real)
+        # Reinsert gap columns with NaN so column positions stay put.
+        plot_matrix = value_frame.copy()
+        plot_matrix[real_cols] = z.values
+        colorscale = "RdBu_r"
+        colorbar_title = "z-score"
+        zmid: Optional[float] = 0.0
+    elif normalize == "log2":
+        plot_matrix = np.log2(value_frame + 1.0)
+        colorscale = "Viridis"
+        colorbar_title = "log<sub>2</sub>(FPKM+1)"
+        zmid = None
+    else:
+        plot_matrix = value_frame
+        colorscale = "Viridis"
+        colorbar_title = "FPKM"
+        zmid = None
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Heatmap(
+            z=plot_matrix.values,
+            x=column_labels,
+            y=gene_symbols,
+            colorscale=colorscale,
+            zmid=zmid,
+            colorbar={
+                "title": {"text": colorbar_title, "side": "right"},
+                "thickness": 14,
+                "len": 0.7,
+            },
+            hovertemplate=(
+                "%{y}<br>%{x}<br>"
+                f"{colorbar_title}: %{{z:.2f}}<extra></extra>"
+            ),
+            xgap=1,
+            ygap=1,
+        )
+    )
+
+    # Block header annotations. One text label per (group, fraction)
+    # block placed above its centre column, then a thicker group
+    # label spanning both IP and INPUT blocks below them.
+    # Implemented via paper-relative annotations because plotly
+    # doesn't natively support hierarchical x-axis labels.
+    annotations = list(fig.layout.annotations or [])
+    block_centres: dict[str, list[float]] = {}
+    running = 0
+    for block_idx, (group, fraction, block_cols) in enumerate(blocks):
+        # Skip gap column before every block except the first.
+        if block_idx > 0:
+            running += 1
+        start = running
+        running += len(block_cols)
+        centre_idx = (start + running - 1) / 2
+        # Translate column index into a paper-relative x position.
+        centre_frac = (centre_idx + 0.5) / len(ordered_columns)
+        annotations.append(
+            {
+                "text": fraction,
+                "showarrow": False,
+                "xref": "paper",
+                "yref": "paper",
+                "x": centre_frac,
+                "y": 1.02,
+                "font": {
+                    "family": NATURE_FONT_FAMILY,
+                    "size": font_size,
+                    "color": "#111111",
+                },
+            }
+        )
+        block_centres.setdefault(group, []).append(centre_frac)
+
+    for group, centres in block_centres.items():
+        annotations.append(
+            {
+                "text": f"<b>{group}</b>",
+                "showarrow": False,
+                "xref": "paper",
+                "yref": "paper",
+                "x": sum(centres) / len(centres),
+                "y": 1.08,
+                "font": {
+                    "family": NATURE_FONT_FAMILY,
+                    "size": font_size + 1,
+                    "color": "#111111",
+                },
+            }
+        )
+
+    # Heatmap needs a taller top margin for the two-row block headers.
+    # Merge the override into the theme dict rather than passing a
+    # separate ``margin=`` kwarg (which would collide with the
+    # default margin in ``nature_theme``).
+    theme = _theme_with_title(font_size, title)
+    theme["margin"] = {"l": 90, "r": 60, "t": 80, "b": 90}
+    fig.update_layout(
+        **theme,
+        xaxis={
+            "tickangle": -45,
+            "showline": True,
+            "linecolor": "#111111",
+            "ticks": "outside",
+        },
+        yaxis={
+            "autorange": "reversed",  # first gene at the top, like a table
+            "showline": True,
+            "linecolor": "#111111",
+            "ticks": "outside",
+        },
+        height=max(60 * len(gene_ids) + 160, 260),
+        annotations=annotations,
+    )
+    return fig
+
+
+def _unique_preserve(items: Iterable) -> list:
+    """Return unique items in first-seen order. Pure-Python stand-in
+    for ``dict.fromkeys(...)`` when we want a list back."""
+    seen: set = set()
+    out: list = []
+    for x in items:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+# ----------------------------------------------------------------------
 # Per-gene log2(IP/Input) strip plot
 # ----------------------------------------------------------------------
 def per_gene_strip(
