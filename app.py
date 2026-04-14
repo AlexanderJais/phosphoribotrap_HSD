@@ -37,6 +37,7 @@ from phosphotrap.figures import (
     GALANIN_GENES,
     cross_contrast_scatter,
     expression_heatmap,
+    figure_export_bytes,
     load_gene_symbol_map,
     parse_highlight_text,
     per_gene_strip,
@@ -160,13 +161,17 @@ def _figure_download_row(fig, basename: str) -> None:
         (col_png, "png", "image/png"),
     ):
         with col:
-            try:
-                img_bytes = fig.to_image(format=fmt, scale=2)
-            except Exception as exc:  # pragma: no cover - UI-only
+            # figure_export_bytes centralises the ``fig.to_image``
+            # try/except so the decision logic (success vs. caption
+            # fallback) can be unit-tested without a Streamlit
+            # runtime. See phosphotrap.figures.figure_export_bytes
+            # and tests/test_figures.py for the coverage.
+            img_bytes, err = figure_export_bytes(fig, fmt)
+            if err is not None:
                 st.caption(
                     f"Install `kaleido` for {fmt.upper()} export "
                     f"(`pip install kaleido` or `mamba install -c "
-                    f"conda-forge kaleido`). Error: {exc}"
+                    f"conda-forge kaleido`). Error: {err}"
                 )
                 continue
             st.download_button(

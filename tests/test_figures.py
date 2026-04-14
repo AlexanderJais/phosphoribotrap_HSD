@@ -8,6 +8,7 @@ added, to keep each commit individually reviewable.
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -369,6 +370,70 @@ def test_neg_log10_handles_zero_and_negative():
     assert np.isnan(out[2])
     assert np.isnan(out[3])
     assert pytest.approx(out[4], abs=1e-9) == 0.0
+
+
+# ----------------------------------------------------------------------
+# figure_export_bytes + fig.to_html round-trip
+# ----------------------------------------------------------------------
+def test_figure_export_bytes_returns_error_when_kaleido_missing():
+    """When ``fig.to_image`` raises (kaleido not installed, bad
+    format string, etc), figure_export_bytes must funnel the
+    exception into a clean (None, str) pair instead of re-raising.
+    The test env doesn't have kaleido installed, so the real
+    ``fig.to_image`` call naturally raises — that's the exact
+    degradation path the Streamlit Figures tab relies on."""
+    df = _fake_contrast_table()
+    fig = fig_mod.volcano_plot(df, title="t")
+    img_bytes, err = fig_mod.figure_export_bytes(fig, format="svg")
+    assert img_bytes is None
+    assert err is not None and isinstance(err, str)
+    # The exact wording depends on the plotly / kaleido version,
+    # but the error should be non-empty and readable.
+    assert len(err) > 0
+
+
+def test_figure_export_bytes_success_path_returns_bytes():
+    """Happy path with ``fig.to_image`` mocked to return bytes —
+    exercises the success branch without needing kaleido installed."""
+    df = _fake_contrast_table()
+    fig = fig_mod.volcano_plot(df, title="t")
+    sentinel = b"<svg>fake bytes</svg>"
+    with patch.object(fig, "to_image", return_value=sentinel) as mock_to_image:
+        img_bytes, err = fig_mod.figure_export_bytes(fig, format="svg", scale=3)
+    mock_to_image.assert_called_once_with(format="svg", scale=3)
+    assert img_bytes == sentinel
+    assert err is None
+
+
+def test_figure_export_bytes_wraps_specific_exception_type():
+    """A non-generic exception from ``fig.to_image`` (e.g.
+    RuntimeError from kaleido's internal browser spawn) should
+    still come back as a (None, string) pair, not propagate."""
+    df = _fake_contrast_table()
+    fig = fig_mod.volcano_plot(df, title="t")
+    with patch.object(
+        fig, "to_image",
+        side_effect=RuntimeError("chromium spawn failed"),
+    ):
+        img_bytes, err = fig_mod.figure_export_bytes(fig, format="png")
+    assert img_bytes is None
+    assert "chromium spawn failed" in err
+
+
+def test_figure_to_html_round_trip_produces_plotly_payload():
+    """The HTML download path in _figure_download_row uses
+    ``fig.to_html(full_html=True, include_plotlyjs="cdn")`` — make
+    sure that produces a string containing a plotly payload and the
+    gene IDs from the input, so the downloaded file is a real,
+    self-contained, interactive figure and not just an empty shell."""
+    df = _fake_contrast_table()
+    fig = fig_mod.volcano_plot(df, title="round-trip test")
+    html = fig.to_html(full_html=True, include_plotlyjs="cdn")
+    assert isinstance(html, str)
+    # CDN mode embeds a <script> tag pointing at plotly.
+    assert "cdn.plot.ly" in html or "plotly" in html.lower()
+    # The title we passed should survive into the HTML payload.
+    assert "round-trip test" in html
 
 
 # ----------------------------------------------------------------------

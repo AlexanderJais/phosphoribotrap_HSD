@@ -565,6 +565,39 @@ def _add_cross_contrast_highlight(
 # ----------------------------------------------------------------------
 # Expression heatmap
 # ----------------------------------------------------------------------
+def figure_export_bytes(
+    fig: go.Figure,
+    format: str,
+    *,
+    scale: int = 2,
+) -> tuple[Optional[bytes], Optional[str]]:
+    """Try to export ``fig`` as ``format`` bytes via kaleido.
+
+    Returns a ``(bytes, error_message)`` pair. On success the bytes
+    are populated and the error is ``None``; on failure the bytes
+    are ``None`` and the error message is a human-readable string
+    suitable for rendering to the user.
+
+    Kaleido is the plotly backend for static image export
+    (``fig.to_image``) and is NOT a hard dependency of this package
+    — if it isn't installed, ``fig.to_image`` raises and this helper
+    funnels that into a clean error string. Callers in the Streamlit
+    Figures tab surface the error as an inline caption hint so the
+    user knows which ``pip install`` / ``mamba install`` command to
+    run. Callers in tests or CLI wrappers can branch on the presence
+    of the error string.
+
+    Extracted from the Streamlit ``_figure_download_row`` helper in
+    ``app.py`` so the decision logic (success vs. caption fallback)
+    can be unit-tested without a Streamlit runtime.
+    """
+    try:
+        img_bytes = fig.to_image(format=format, scale=scale)
+    except Exception as exc:
+        return None, str(exc)
+    return img_bytes, None
+
+
 def _unique_preserve(items: Iterable) -> list:
     """Return unique items in first-seen order. Pure-Python stand-in
     for ``dict.fromkeys(...)`` when we want a list back. Used by

@@ -1,4 +1,4 @@
-"""Regression tests for app.py widget-key conventions.
+"""Regression tests for ``app.py`` structure and widget-key conventions.
 
 The HIGH-priority bugs that caused the first live pipeline crash all
 shared one root cause: Streamlit text_inputs / checkboxes / selectboxes
@@ -7,13 +7,24 @@ silently overwrite ``cfg`` updates from other tabs.
 
 These are static-analysis tests over ``app.py`` — they don't import or
 execute Streamlit. The point is to fail loudly if someone refactors
-the Config or Reference tab and accidentally drops a ``key=`` from one
-of the widgets that needs to be programmatically updatable.
+any of the tabs and accidentally drops a ``key=`` from a widget that
+needs to be programmatically updatable, or reorders / renames / deletes
+a tab, or guts a panel block from the Figures tab.
 
-If the test fails after a legitimate refactor, update ``REQUIRED_KEYS``
-below to match — but think twice before doing so. Each entry was added
-because losing the key would resurrect a class of bug we already paid
-for once.
+Three regression guards live here:
+
+* ``REQUIRED_KEYS`` — widget keys that MUST stay explicit.
+* ``EXPECTED_TABS`` — tab names in their positional order (the
+  ``with tabs[N]:`` blocks are index-based, so a reorder without
+  matching index updates would silently mis-route rendering).
+* A source-scan smoke test for the Figures tab body, checking that
+  the five publication panels (A-E) are still wired up and the
+  download-row helper is still called.
+
+If a test fails after a legitimate refactor, update the matching
+constant below — but think twice before doing so. Each entry was
+added because losing the invariant would resurrect a class of bug
+we already paid for once.
 """
 
 from __future__ import annotations
@@ -136,4 +147,144 @@ def test_no_widget_uses_value_and_key_together():
         + "\n".join("  " + o for o in offenders)
         + "\n\nUse st.session_state.setdefault(key, default) before "
         "the widget instead, then render with key=... only."
+    )
+
+
+# ----------------------------------------------------------------------
+# Tab order + Figures-tab smoke test (TEST #13 + #10 from audit)
+# ----------------------------------------------------------------------
+
+# The seven tabs in their positional order. ``with tabs[N]:`` blocks
+# in app.py are index-based, so a reorder without matching index
+# updates silently mis-routes rendering (e.g. Logs content rendering
+# into the Figures tab slot). This tuple is the single source of
+# truth — update it only alongside a deliberate tab reshuffle.
+EXPECTED_TABS = (
+    "Config",
+    "Reference",
+    "Samples",
+    "Pipeline",
+    "Analysis",
+    "Figures",
+    "Logs",
+)
+
+
+def test_tab_names_and_order_match_expected():
+    """``st.tabs([...])`` must contain the seven expected tab names
+    in the expected positional order. A mismatch almost always
+    indicates a refactor that reordered tabs without updating the
+    matching ``with tabs[N]:`` indices below."""
+    src = _app_source()
+    # Match the st.tabs([...]) call — accepts multi-line list.
+    m = re.search(r"st\.tabs\(\s*\[([^\]]+)\]\s*\)", src)
+    assert m, "No st.tabs([...]) call found in app.py"
+    inside = m.group(1)
+    # Extract the quoted tab names in order.
+    names = re.findall(r'["\']([^"\']+)["\']', inside)
+    assert tuple(names) == EXPECTED_TABS, (
+        f"Tab names / order diverged from EXPECTED_TABS:\n"
+        f"  expected: {EXPECTED_TABS}\n"
+        f"  got:      {tuple(names)}\n\n"
+        "If this is a deliberate reshuffle, update EXPECTED_TABS "
+        "AND every ``with tabs[N]:`` index in app.py."
+    )
+
+
+def test_each_tab_index_has_a_with_block():
+    """Every tab index 0..N-1 must have a matching ``with tabs[N]:``
+    block. Otherwise the tab renders as a blank panel and the user
+    clicks it once, sees nothing, and closes the app."""
+    src = _app_source()
+    indices = set(
+        int(m.group(1))
+        for m in re.finditer(r"with\s+tabs\[(\d+)\]\s*:", src)
+    )
+    expected_indices = set(range(len(EXPECTED_TABS)))
+    missing = expected_indices - indices
+    assert not missing, (
+        f"Tab indices present in st.tabs([...]) but missing a "
+        f"matching ``with tabs[N]:`` body: {sorted(missing)}. "
+        "Every tab index needs a body block — otherwise the tab "
+        "renders as a blank panel."
+    )
+    extra = indices - expected_indices
+    assert not extra, (
+        f"``with tabs[N]:`` blocks found for indices beyond the "
+        f"declared tab count: {sorted(extra)}. These would render "
+        "no content and are almost always leftover from a deleted "
+        "tab whose index wasn't cleaned up."
+    )
+
+
+# Required structural elements of the Figures tab body. These are
+# the five publication panels plus the download-row helper call.
+# The subheader strings are exactly what ``st.subheader(...)``
+# renders, so if someone silently deletes one they fail this test
+# instead of producing a Figures tab with four panels instead of
+# five.
+FIGURES_TAB_REQUIRED_MARKERS = (
+    # Panel subheaders.
+    "A — Volcano plots",
+    "B — Per-gene log₂(IP/Input)",
+    "C — Expression heatmap",
+    "D — anota2seq regulatory mode",
+    "E — Cross-contrast consistency",
+    # Plot-helper call sites — one per panel except panel D (which
+    # uses a DataFrame/st.dataframe, not a plotly chart).
+    "volcano_plot(",
+    "per_gene_strip(",
+    "expression_heatmap(",
+    "regmode_classification(",
+    "cross_contrast_scatter(",
+    # The download-row helper must be invoked for every chart panel
+    # so users can grab HTML / SVG / PNG copies.
+    "_figure_download_row(",
+)
+
+
+def test_figures_tab_body_has_all_five_panels():
+    """TEST #10 from the audit: smoke test that the Figures tab body
+    still contains the A-E panel subheaders, the plot-helper calls,
+    and at least one _figure_download_row invocation. Guards against
+    accidentally gutting the tab during a future refactor."""
+    src = _app_source()
+    missing = [
+        marker for marker in FIGURES_TAB_REQUIRED_MARKERS
+        if marker not in src
+    ]
+    assert not missing, (
+        "Figures tab body is missing required panel markers / "
+        "helper calls:\n  "
+        + "\n  ".join(missing)
+        + "\n\nIf this is a deliberate refactor, update "
+        "FIGURES_TAB_REQUIRED_MARKERS to match. Otherwise the "
+        "Figures tab has lost a publication panel and the "
+        "manuscript figure is incomplete."
+    )
+
+
+def test_figures_tab_download_row_called_for_every_chart_panel():
+    """Four of the five panels (A, B, C, E) use a plotly chart and
+    should each feed _figure_download_row. Panel D is a DataFrame
+    so it uses a direct st.download_button instead. The chart count
+    on panel A varies (one volcano per contrast) so we just require
+    at least four _figure_download_row calls total — one per
+    non-tabular panel plus at least one per-contrast volcano."""
+    src = _app_source()
+    # Grab just the Figures-tab body to avoid counting matches in
+    # the helper's own docstring.
+    body_match = re.search(
+        r"# FIGURES TAB\s*\n# ={10,}\s*\nwith tabs\[\d+\]:(.*?)"
+        r"(?=\n# ={10,}\s*\n# [A-Z]+ TAB)",
+        src,
+        flags=re.DOTALL,
+    )
+    assert body_match, "Could not locate Figures tab body in app.py"
+    body = body_match.group(1)
+    n_calls = len(re.findall(r"_figure_download_row\(", body))
+    assert n_calls >= 4, (
+        f"Expected at least 4 _figure_download_row calls in the "
+        f"Figures tab body (one per chart panel: volcano, strip, "
+        f"heatmap, cross-contrast), found {n_calls}."
     )
