@@ -310,6 +310,45 @@ def test_volcano_plot_font_size_propagates_to_layout():
     assert fig.layout.font.size == 20
 
 
+def test_volcano_plot_alpha_zero_does_not_raise():
+    """MEDIUM #3 regression: ``alpha=0`` previously passed ``y=None``
+    to ``add_hline`` which raises ValueError. With the guard, the
+    horizontal threshold line is simply omitted.
+    """
+    df = _fake_contrast_table()
+    # Must not raise.
+    fig = fig_mod.volcano_plot(df, title="t", alpha=0.0)
+    assert isinstance(fig, go.Figure)
+    # With alpha=0, the -log10(alpha) hline is skipped, so the set
+    # of shapes should NOT contain a horizontal dashed line at the
+    # padj threshold. The vertical x=0 line should still be present.
+    shapes = list(fig.layout.shapes or ())
+    horizontal_shapes = [
+        s for s in shapes
+        if getattr(s, "y0", None) is not None
+        and getattr(s, "y1", None) is not None
+        and s.y0 == s.y1
+    ]
+    assert horizontal_shapes == [], (
+        "alpha=0 should omit the horizontal threshold line"
+    )
+
+
+def test_volcano_plot_alpha_positive_draws_threshold_line():
+    df = _fake_contrast_table()
+    fig = fig_mod.volcano_plot(df, title="t", alpha=0.1)
+    shapes = list(fig.layout.shapes or ())
+    horizontal_shapes = [
+        s for s in shapes
+        if getattr(s, "y0", None) is not None
+        and getattr(s, "y1", None) is not None
+        and s.y0 == s.y1
+    ]
+    assert len(horizontal_shapes) == 1
+    # y0 should equal -log10(0.1) == 1.0.
+    assert pytest.approx(horizontal_shapes[0].y0, abs=1e-9) == 1.0
+
+
 def test_volcano_plot_handles_missing_padj_column():
     df = _fake_contrast_table().drop(columns=["mannwhitney_padj"])
     fig = fig_mod.volcano_plot(df, title="C", alpha=0.1)

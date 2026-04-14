@@ -1222,12 +1222,15 @@ def volcano_plot(
         delta_col=delta_col,
     )
 
-    # Reference lines: y = -log10(alpha) and x = 0.
-    fig.add_hline(
-        y=-np.log10(alpha) if alpha > 0 else None,
-        line={"color": COLOR_DIAGONAL, "width": 1, "dash": "dash"},
-        opacity=0.6,
-    )
+    # Reference lines: y = -log10(alpha) (only when alpha > 0; a
+    # non-positive threshold has no defined -log10, and passing
+    # ``y=None`` to ``add_hline`` raises ValueError) and x = 0.
+    if alpha > 0:
+        fig.add_hline(
+            y=-np.log10(alpha),
+            line={"color": COLOR_DIAGONAL, "width": 1, "dash": "dash"},
+            opacity=0.6,
+        )
     fig.add_vline(
         x=0,
         line={"color": COLOR_DIAGONAL, "width": 1, "dash": "dot"},

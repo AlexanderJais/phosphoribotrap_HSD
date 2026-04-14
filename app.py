@@ -114,6 +114,26 @@ cfg: AppConfig = st.session_state.cfg
 disk_cfg: AppConfig = st.session_state.disk_config
 
 
+@st.cache_data(show_spinner=False)
+def _cached_symbol_map(tx2gene_path: str, mtime: float) -> dict[str, str]:
+    """Cached wrapper around ``phosphotrap.figures.load_gene_symbol_map``.
+
+    The raw helper reparses the full tx2gene TSV on every call — for
+    a GENCODE mouse M38 build that's ~278 k rows, ~14 MB, and
+    ~100-200 ms per call. Without caching, the Figures-tab body
+    (which runs on every Streamlit rerun regardless of the active
+    tab) would re-parse it on every keystroke in any tab. That's
+    enough latency to show up as visible UI lag.
+
+    The ``mtime`` argument is the cache-invalidation key — Streamlit
+    re-runs the wrapped function only when the argument tuple
+    changes. Passing the file's ``mtime`` alongside its path means
+    the cache refreshes automatically when the Reference tab
+    rebuilds the reference and writes a new tx2gene.tsv.
+    """
+    return load_gene_symbol_map(Path(tx2gene_path))
+
+
 def _figure_download_row(fig, basename: str) -> None:
     """Render a three-button row: HTML / SVG / PNG download for a
     plotly figure.
@@ -1260,7 +1280,11 @@ with tabs[5]:
         )
     else:
         try:
-            _symbol_map = load_gene_symbol_map(Path(cfg.tx2gene_tsv))
+            # Cached by (path, mtime) so the 278 k-row tx2gene isn't
+            # re-parsed on every rerun. See ``_cached_symbol_map`` for
+            # the rationale.
+            _mtime = Path(cfg.tx2gene_tsv).stat().st_mtime
+            _symbol_map = _cached_symbol_map(cfg.tx2gene_tsv, _mtime)
         except FileNotFoundError as exc:
             _symbol_map = {}
             st.error(f"Could not read tx2gene: {exc}")
@@ -1360,10 +1384,7 @@ with tabs[5]:
                         highlight_secondary=custom_resolved,
                         font_size=font_size,
                     )
-                    st.plotly_chart(
-                        _fig, use_container_width=True,
-                        key=f"fig_volcano_{_contrast_name}",
-                    )
+                    st.plotly_chart(_fig, use_container_width=True)
                     _figure_download_row(
                         _fig, f"volcano_{_contrast_name}"
                     )
@@ -1406,10 +1427,7 @@ with tabs[5]:
                     font_size=font_size,
                     group_order=list(GROUPS),
                 )
-                st.plotly_chart(
-                    _fig, use_container_width=True,
-                    key="fig_per_gene_strip",
-                )
+                st.plotly_chart(_fig, use_container_width=True)
                 _figure_download_row(_fig, "per_gene_strip")
 
             st.divider()
@@ -1439,10 +1457,7 @@ with tabs[5]:
                     normalize=heatmap_norm,
                     group_order=list(GROUPS),
                 )
-                st.plotly_chart(
-                    _fig, use_container_width=True,
-                    key="fig_expression_heatmap",
-                )
+                st.plotly_chart(_fig, use_container_width=True)
                 _figure_download_row(_fig, "heatmap")
 
             st.divider()
@@ -1517,10 +1532,7 @@ with tabs[5]:
                     highlight_secondary=custom_resolved,
                     font_size=font_size,
                 )
-                st.plotly_chart(
-                    _fig, use_container_width=True,
-                    key="fig_cross_contrast",
-                )
+                st.plotly_chart(_fig, use_container_width=True)
                 _figure_download_row(_fig, "cross_contrast")
 
 # ======================================================================
