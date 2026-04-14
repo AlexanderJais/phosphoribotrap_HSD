@@ -17,8 +17,14 @@ Everything is pure Python except the final ``salmon index`` shell-out:
   count.
 
 The orchestrator ``build_reference`` composes a single 0-to-1 progress
-fraction across all five stages so the Streamlit progress bar advances
-smoothly through download → decoys → gentrome → salmon index → tx2gene.
+fraction across all seven stages so the Streamlit progress bar
+advances smoothly through:
+
+    download transcriptome -> download genome -> download GTF ->
+    decoys -> gentrome -> salmon index -> tx2gene
+
+(Downloads are split into three stages so the genome's ~700 MB
+dominates the bar's movement during the slowest step.)
 
 Caching is per-file: every step skips its work if its output already
 exists with non-zero size and ``force=False``. Re-running the build
@@ -30,6 +36,7 @@ from __future__ import annotations
 import gzip
 import re
 import shutil
+import socket
 import subprocess
 import time
 import urllib.error
@@ -46,6 +53,20 @@ logger = get_logger()
 # user-facing label. Matches the convention used by pipeline.run_pipeline
 # so the same Streamlit progress-bar wiring works for both.
 ProgressCB = Callable[[float, str], None]
+
+# Idle timeout for download reads. ``urllib.request.urlopen(req, timeout=N)``
+# applies ``N`` to EACH blocking socket operation (connect + each recv),
+# not to the total download wall-clock. So a sustained-slow download
+# still completes: each chunk just needs to arrive inside this window.
+# A completely stalled connection (no bytes at all) raises
+# ``socket.timeout`` after this many seconds and ``download_file``
+# re-raises it as a user-facing ``RuntimeError`` with a clearer message.
+#
+# 120 seconds is the sweet spot: long enough that hotel wifi burps
+# don't kill a legitimate download, short enough that the user isn't
+# staring at a frozen progress bar for half an hour before being told
+# the server stalled.
+_DOWNLOAD_IDLE_TIMEOUT_S = 120
 
 
 # ----------------------------------------------------------------------
@@ -155,7 +176,9 @@ def download_file(
         req = urllib.request.Request(
             url, headers={"User-Agent": "phosphotrap-reference/1.0"}
         )
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(
+            req, timeout=_DOWNLOAD_IDLE_TIMEOUT_S
+        ) as resp:
             total = int(resp.headers.get("Content-Length", "0") or 0)
             downloaded = 0
             last_emit = 0.0
@@ -181,9 +204,31 @@ def download_file(
                             mb = downloaded / 1_000_000
                             progress_cb(0.5, f"{label}: {mb:.0f} MB")
         tmp.replace(dest)
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
+    except socket.timeout as exc:
+        # Idle stall: the server accepted the connection but stopped
+        # sending data for longer than ``_DOWNLOAD_IDLE_TIMEOUT_S``.
+        # Bubble up with a specific message so the user knows it's
+        # a network issue, not a path issue.
         if tmp.exists():
             tmp.unlink()
+        raise RuntimeError(
+            f"download stalled for {url}: no bytes received for "
+            f"{_DOWNLOAD_IDLE_TIMEOUT_S}s. Check your network "
+            f"connection and retry."
+        ) from exc
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
+        # The urllib errors wrap socket.timeout as ``URLError(reason=...)``
+        # in some Python versions, so we peek inside and emit the same
+        # "stalled" message when that's the case.
+        if tmp.exists():
+            tmp.unlink()
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, socket.timeout):
+            raise RuntimeError(
+                f"download stalled for {url}: no bytes received for "
+                f"{_DOWNLOAD_IDLE_TIMEOUT_S}s. Check your network "
+                f"connection and retry."
+            ) from exc
         raise RuntimeError(f"download failed for {url}: {exc}") from exc
 
     if progress_cb is not None:

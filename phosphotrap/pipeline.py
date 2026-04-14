@@ -17,6 +17,7 @@ from __future__ import annotations
 import shlex
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,15 @@ from .samples import SampleRecord
 RunCallback = Callable[[int, int, float, str], None]
 
 logger = get_logger()
+
+# Wall-clock ceiling for individual fastp / salmon invocations. A
+# correctly-behaved run on this design is ~5-10 minutes per sample;
+# two hours is "something is catastrophically wrong, kill it and tell
+# the user" territory. Without this, a hung subprocess (disk I/O
+# wedged, deadlocked mmap, malformed input looping forever) would
+# hang the Streamlit UI indefinitely with no way back short of
+# killing the streamlit process from a terminal.
+_SUBPROCESS_TIMEOUT_S = 2 * 60 * 60
 
 
 @dataclass
@@ -93,6 +103,7 @@ def _run_tee(
     log_file: Path,
     progress_cb: Optional[Callable[[float], None]] = None,
     total_expected: float = 1.0,
+    timeout_s: float = _SUBPROCESS_TIMEOUT_S,
 ) -> tuple[int, str]:
     """Run a subprocess, tee stdout+stderr to ``log_file``, return (rc, tail).
 
@@ -101,10 +112,23 @@ def _run_tee(
     reliably across versions, we fake a smooth ramp via line count: the
     callback sees ``min(0.95, n_lines / total_expected)`` on every line,
     then 1.0 once the process exits cleanly.
+
+    ``timeout_s`` is a last-resort wall-clock ceiling. If the subprocess
+    outlives it, a watchdog thread sends SIGTERM, then SIGKILL 5 seconds
+    later if it's still alive. The function returns ``rc`` from the
+    killed process (negative on POSIX, indicating the signal) and the
+    tail includes a ``WATCHDOG: ...`` marker so the caller's StepResult
+    message makes it obvious what happened.
+
+    The watchdog runs on a daemon thread so it never prevents
+    interpreter exit. The main thread continues to read stdout until
+    EOF (which happens when the process terminates), so streaming
+    progress callbacks keep firing right up to the kill point.
     """
     logger.info("exec: %s", _pretty_cmd(cmd))
     log_file.parent.mkdir(parents=True, exist_ok=True)
     tail: list[str] = []
+
     with log_file.open("a", encoding="utf-8") as lf:
         lf.write(f"\n# {_pretty_cmd(cmd)}\n")
         proc = subprocess.Popen(
@@ -115,6 +139,45 @@ def _run_tee(
             bufsize=1,
             shell=False,
         )
+
+        # Watchdog: schedule a SIGTERM + SIGKILL if the process exceeds
+        # ``timeout_s`` seconds. ``killed_by_watchdog`` is a simple
+        # mutable flag the main thread reads after ``wait()`` to
+        # distinguish a watchdog kill from a genuine non-zero exit.
+        killed_by_watchdog = {"fired": False}
+
+        def _watchdog() -> None:
+            # time.sleep is interruptible by process exit in practice
+            # because the thread is a daemon — if the subprocess
+            # finishes normally, the main thread will set
+            # ``proc.returncode`` and we skip the kill. The race is
+            # benign: kill on an already-exited process is a no-op.
+            time.sleep(timeout_s)
+            if proc.poll() is None:
+                killed_by_watchdog["fired"] = True
+                logger.warning(
+                    "watchdog: subprocess exceeded %ss, sending SIGTERM: %s",
+                    timeout_s, _pretty_cmd(cmd),
+                )
+                try:
+                    proc.terminate()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+                # Give it 5 seconds to exit cleanly, then SIGKILL.
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    logger.warning(
+                        "watchdog: SIGTERM did not stop subprocess, sending SIGKILL"
+                    )
+                    try:
+                        proc.kill()
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+
+        watchdog = threading.Thread(target=_watchdog, daemon=True)
+        watchdog.start()
+
         n_lines = 0
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -126,8 +189,18 @@ def _run_tee(
             if progress_cb is not None:
                 progress_cb(min(0.95, n_lines / max(total_expected, 1.0)))
         rc = proc.wait()
+
+        if killed_by_watchdog["fired"]:
+            marker = (
+                f"\nWATCHDOG: subprocess killed after exceeding "
+                f"{timeout_s:.0f}s wall-clock timeout.\n"
+            )
+            lf.write(marker)
+            tail.append(marker)
+
         if progress_cb is not None:
             progress_cb(1.0)
+
     return rc, "".join(tail)
 
 

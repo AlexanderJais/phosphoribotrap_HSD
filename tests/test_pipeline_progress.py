@@ -16,6 +16,7 @@ needed and the tests run in milliseconds.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -220,6 +221,62 @@ def test_run_salmon_cache_hit_requires_both_files(tmp_path: Path):
     assert called["n"] == 1, "cache check must not short-circuit without quant.genes.sf"
     assert res.ok is False
     assert "quant.genes.sf" in res.message
+
+
+def test_run_tee_watchdog_kills_hung_subprocess(tmp_path: Path):
+    """MEDIUM #7: _run_tee should kill a subprocess that exceeds timeout_s.
+
+    Launches a real Python subprocess that prints one line, then sleeps
+    for 10 seconds. With timeout_s=0.8 the watchdog fires, SIGTERMs the
+    process, and _run_tee returns. The tail must contain the WATCHDOG
+    marker so caller StepResult messages can surface it.
+    """
+    import sys
+
+    from phosphotrap.pipeline import _run_tee
+
+    log_file = tmp_path / "watchdog.log"
+    # Print one line, flush, then sleep longer than the timeout.
+    # ``sys.stdout.flush()`` ensures the line reaches our stdout pipe
+    # BEFORE the sleep, so _run_tee's reader loop gets something to
+    # iterate over and the subprocess isn't silently killed mid-read.
+    cmd = [
+        sys.executable,
+        "-u",
+        "-c",
+        "import sys, time; print('hello'); sys.stdout.flush(); time.sleep(10)",
+    ]
+
+    t0 = time.monotonic()
+    rc, tail = _run_tee(cmd, log_file, timeout_s=0.8)
+    elapsed = time.monotonic() - t0
+
+    # Watchdog should kill within (timeout + 5s grace for SIGKILL step),
+    # not the full 10s of the subprocess sleep.
+    assert elapsed < 8.0, (
+        f"watchdog did not fire in time: elapsed={elapsed:.1f}s"
+    )
+    # Killed process has a non-zero rc (signal-based negative on POSIX).
+    assert rc != 0
+    assert "WATCHDOG" in tail
+    assert "hello" in tail  # the pre-sleep line made it through
+
+
+def test_run_tee_normal_subprocess_is_not_killed(tmp_path: Path):
+    """Watchdog must NOT fire on a subprocess that exits before the timeout."""
+    import sys
+
+    from phosphotrap.pipeline import _run_tee
+
+    log_file = tmp_path / "ok.log"
+    # Prints a line and exits immediately — well within timeout_s.
+    cmd = [sys.executable, "-u", "-c", "print('done')"]
+
+    rc, tail = _run_tee(cmd, log_file, timeout_s=5.0)
+
+    assert rc == 0
+    assert "done" in tail
+    assert "WATCHDOG" not in tail
 
 
 def test_empty_records_final_callback_has_nonnegative_indices(tmp_path: Path):

@@ -436,27 +436,49 @@ with tabs[1]:
         "the two paths the Config tab needs to run the pipeline."
     )
 
+    # Reference-tab widgets use the same explicit-key + setdefault
+    # pattern as the Config-tab widgets (d3b838f, 3912527, 7803e36).
+    # Passing BOTH ``value=`` and ``key=`` to a Streamlit widget is an
+    # anti-pattern that emits ``StreamlitAPIException`` on recent
+    # versions and silently breaks programmatic updates on older ones.
+    #
+    # The default destination is computed ONCE, at first render, from
+    # the initial release. If the user later bumps the release from
+    # M38 to M39, ``ref_dest`` stays pinned to their existing choice
+    # rather than silently flipping under them — safer and more
+    # predictable than the recompute-on-every-render behaviour the
+    # original code had. The help text nudges the user to bump the
+    # destination themselves when they change release.
+    st.session_state.setdefault(
+        "ref_release", DEFAULT_GENCODE_MOUSE_RELEASE
+    )
+    st.session_state.setdefault(
+        "ref_dest",
+        str(
+            Path.home()
+            / "phosphotrap_refs"
+            / f"gencode_mouse_{st.session_state['ref_release']}"
+        ),
+    )
+    st.session_state.setdefault("ref_threads", int(cfg.threads))
+    st.session_state.setdefault("ref_force", False)
+
     rcol1, rcol2 = st.columns(2)
     with rcol1:
-        ref_release = st.text_input(
+        st.text_input(
             "GENCODE mouse release",
-            value=st.session_state.get(
-                "ref_release", DEFAULT_GENCODE_MOUSE_RELEASE
-            ),
             key="ref_release",
             help=(
                 "e.g. M38 (current as of 2025-09-02). Pick the latest "
                 "from https://ftp.ebi.ac.uk/pub/databases/gencode/"
                 "Gencode_mouse/ — only the release token changes, the "
-                "filenames are stable."
+                "filenames are stable. NOTE: changing this does NOT "
+                "auto-update the Destination directory below — bump "
+                "it yourself if you want a separate folder per release."
             ),
         )
-        default_dest = str(
-            Path.home() / "phosphotrap_refs" / f"gencode_mouse_{ref_release}"
-        )
-        ref_dest = st.text_input(
+        st.text_input(
             "Destination directory",
-            value=st.session_state.get("ref_dest", default_dest),
             key="ref_dest",
             help=(
                 "Where the downloads, gentrome, salmon index, and "
@@ -465,18 +487,15 @@ with tabs[1]:
             ),
         )
     with rcol2:
-        ref_threads = int(
-            st.number_input(
-                "Threads (for salmon index)",
-                min_value=1,
-                max_value=128,
-                value=int(st.session_state.get("ref_threads", cfg.threads)),
-                key="ref_threads",
-            )
+        st.number_input(
+            "Threads (for salmon index)",
+            min_value=1,
+            max_value=128,
+            step=1,
+            key="ref_threads",
         )
-        ref_force = st.checkbox(
+        st.checkbox(
             "Force rebuild (ignore cached salmon index)",
-            value=False,
             key="ref_force",
             help=(
                 "Downloads are still skipped if the .fa.gz / .gtf.gz "
@@ -484,6 +503,15 @@ with tabs[1]:
                 "forced."
             ),
         )
+
+    # Snapshot the current widget values into locals for the rest of
+    # the tab. These are live reads from session state, not the
+    # widget return values — equivalent but cleaner than relying on
+    # the return value of the render call.
+    ref_release = st.session_state["ref_release"]
+    ref_dest = st.session_state["ref_dest"]
+    ref_threads = int(st.session_state["ref_threads"])
+    ref_force = bool(st.session_state["ref_force"])
 
     # Preview the URLs the build will hit so the user can sanity-check
     # the release name before kicking off a 1 GB download.

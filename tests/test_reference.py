@@ -223,6 +223,47 @@ def test_download_file_skips_when_present(tmp_path: Path):
     mock_open.assert_not_called()
 
 
+def test_download_file_idle_stall_raises_runtime_error(tmp_path: Path):
+    """MEDIUM #6: a stalled socket read must surface as a clear error.
+
+    Mocks the urlopen response so that ``resp.read()`` raises
+    ``socket.timeout`` on the first call — simulating a server that
+    accepted the connection but stopped sending bytes. The user-facing
+    RuntimeError must mention "stalled" and the idle-timeout constant
+    so the user knows it's a network issue, not a path issue.
+    """
+    import socket
+    from unittest.mock import MagicMock
+
+    dest = tmp_path / "bigfile.fa.gz"
+    # Leave dest absent so we don't hit the cache short-circuit.
+
+    class _StallingResp:
+        headers = {"Content-Length": "1000000"}
+
+        def read(self, _chunk_size):
+            raise socket.timeout("no bytes from server")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    with patch(
+        "phosphotrap.reference.urllib.request.urlopen",
+        return_value=_StallingResp(),
+    ):
+        with pytest.raises(RuntimeError) as exc_info:
+            ref.download_file("https://example/stalled", dest)
+
+    msg = str(exc_info.value)
+    assert "stalled" in msg.lower()
+    # Partial file should not be left behind.
+    assert not dest.exists()
+    assert not dest.with_name(dest.name + ".partial").exists()
+
+
 # ----------------------------------------------------------------------
 # build_reference orchestrator
 # ----------------------------------------------------------------------
