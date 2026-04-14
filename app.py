@@ -243,16 +243,33 @@ with tabs[0]:
     # reconcile before rendering — otherwise Streamlit will either crash
     # (older versions) or silently drop the stale values (newer
     # versions). Either way the user would see the wrong thing.
+    #
+    # Reference-group widget uses the same explicit-key + session-state
+    # pattern as the path fields and Runtime widgets. Previously it used
+    # ``cfg.reference_group = st.selectbox(..., index=...)`` which (a)
+    # is the same antipattern that caused the tx2gene-as-directory bug,
+    # and (b) means programmatic updates from other tabs would get
+    # silently reverted on the next Config-tab render. See the
+    # d3b838f post-mortem.
+    st.session_state.setdefault(
+        "widget_reference_group",
+        cfg.reference_group if cfg.reference_group in GROUPS else GROUPS[0],
+    )
     d1, d2 = st.columns(2)
     with d1:
-        cfg.reference_group = st.selectbox(
+        st.selectbox(
             "Reference group",
             options=list(GROUPS),
-            index=list(GROUPS).index(cfg.reference_group)
-            if cfg.reference_group in GROUPS else 0,
+            key="widget_reference_group",
             help="Contrast strings on downstream tabs are derived from this.",
         )
-        available = contrasts_for_reference(cfg.reference_group, GROUPS)
+        # ``available`` is derived from the FRESH widget value via
+        # session state, not from cfg — cfg gets the copy-back at the
+        # end of the tab, so during this block it's still showing the
+        # value from the previous rerun.
+        available = contrasts_for_reference(
+            st.session_state["widget_reference_group"], GROUPS
+        )
 
         _contrasts_key = "contrasts_multiselect"
         if _contrasts_key in st.session_state:
@@ -326,6 +343,7 @@ with tabs[0]:
     cfg.run_fastp             = bool(st.session_state["widget_run_fastp"])
     cfg.force_rerun           = bool(st.session_state["widget_force_rerun"])
     cfg.salmon_libtype        = str(st.session_state["widget_salmon_libtype"])
+    cfg.reference_group       = str(st.session_state["widget_reference_group"])
     cfg.anota_delta_pt        = float(st.session_state["widget_anota_delta_pt"])
     cfg.anota_delta_tp        = float(st.session_state["widget_anota_delta_tp"])
     cfg.anota_max_padj        = float(st.session_state["widget_anota_max_padj"])
