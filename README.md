@@ -189,13 +189,14 @@ substitute for that at n = 3 per group.
 ## Repository layout
 
 ```
-app.py                      # Streamlit entry point (5 tabs)
+app.py                      # Streamlit entry point (6 tabs)
 phosphotrap/
   __init__.py
   logger.py                 # rotating-file logger, idempotent for Streamlit reruns
   config.py                 # AppConfig dataclass + JSON persistence
   samples.py                # default 18-row sheet, fastq discovery, pair resolver
   pipeline.py               # fastp + salmon runners, progress callbacks
+  reference.py              # GENCODE downloader + salmon index + tx2gene builder
   fpkm.py                   # FPKM, sign-consistency, Mann-Whitney
   anota2seq_runner.py       # primary analysis — Rscript shell-out
   deseq2_runner.py          # optional DESeq2 interaction cross-check
@@ -204,28 +205,37 @@ requirements.txt            # pip side (Python only)
 environment.yml             # conda bootstrap (includes bioconda tools)
 ```
 
-## Streamlit app — the five tabs
+## Streamlit app — the six tabs
 
 1. **Config** — paths, runtime options, reference group, contrasts, the
    chronic-stimulus preset toggle, anota2seq thresholds, auto-save on
    pipeline start, "Check environment" button. Shows an unsaved-
    changes indicator vs. the JSON on disk.
-2. **Samples** — the 18-row default sheet, editable via `st.data_editor`
+2. **Reference** — one-button GENCODE mouse downloader + decoy-aware
+   `salmon index` builder + `tx2gene.tsv` builder. Skip-if-cached at
+   every stage, single composite progress bar, and a "Use these paths
+   in Config" button that auto-populates `salmon_index` /
+   `tx2gene_tsv` and saves the config. Implemented in pure Python
+   (`phosphotrap/reference.py`) on `urllib` + `gzip` + one
+   `salmon index` shell-out — no `curl` / `zcat` / `awk` dependencies.
+   See the "Reference: building the salmon index + tx2gene" section
+   below for the manual command-line equivalent.
+3. **Samples** — the 18-row default sheet, editable via `st.data_editor`
    with `num_rows="dynamic"`. Auto-populate fastq paths from a scanned
    directory. Upload custom TSV/CSV. Summary shows groups detected and
    matched IP/INPUT pairs per group. NaN-safe.
-3. **Pipeline** — multiselect of ready samples, start button, live
+4. **Pipeline** — multiselect of ready samples, start button, live
    progress bar that advances mid-sample (not just at sample
    boundaries), per-sample `<report_dir>/<sample>.log` files, dry-run
    checkbox.
-4. **Analysis** — contrast selector, "Load salmon quant outputs",
+5. **Analysis** — contrast selector, "Load salmon quant outputs",
    FPKM preview + TSV download, "Compute IP/Input ratios" (per-group
    sign-consistency + between-group Mann-Whitney for the selected
    contrast), "Run anota2seq" and "DESeq2 interaction cross-check"
    buttons. Histogram, top-30 bar chart, volcano plot, and separate
    anota2seq translation/buffering/mRNA-abundance tables. Downloads
    everywhere.
-5. **Logs** — live tail of `logs/phosphotrap.log` with substring
+6. **Logs** — live tail of `logs/phosphotrap.log` with substring
    filter. Stitches rolled-over backups so a long run straddling a
    rotation boundary doesn't drop recent lines. The filter-clear
    button stages a reset and reruns the script *before* the widget is
@@ -273,9 +283,42 @@ missing, but the primary analysis won't run.
 
 The pipeline doesn't ship a salmon index — `salmon_index` and
 `tx2gene_tsv` in `phosphotrap/config.py` are paths you provide. Build
-them once, store them somewhere stable (e.g. `~/refs/salmon/GRCm39_M38/`),
+them once, store them somewhere stable (e.g. `~/phosphotrap_refs/gencode_mouse_M38/`),
 and point every mouse project at the same directory. The index is
 ~15 GB and reusable; you only build it once.
+
+### Recommended: the **Reference** tab in the Streamlit app
+
+Open the app (`streamlit run app.py`) and switch to the **Reference**
+tab — second from the left. It hides the entire download / decoys /
+gentrome / `salmon index` / `tx2gene.tsv` workflow behind a single
+button:
+
+1. Set the GENCODE release (default `M38`) and a destination directory
+   (default `~/phosphotrap_refs/gencode_mouse_M38/`). Expand the
+   "Preview download URLs" panel to sanity-check the release name
+   before kicking off ~1 GB of downloads.
+2. Click **Build reference**. A single progress bar tracks all five
+   stages: download transcriptome, download genome, download GTF,
+   build decoys + gentrome, run `salmon index`, build `tx2gene.tsv`.
+   Every step is skip-if-cached, so re-running over an existing
+   destination directory is a no-op.
+3. When the build finishes, click **Use these paths in Config** to
+   auto-populate `salmon_index` and `tx2gene_tsv` and save the config
+   to disk in one go. Switch to the Pipeline tab and you're ready.
+
+The whole thing is implemented in pure Python (`phosphotrap/reference.py`)
+on top of `urllib`, `gzip`, and a single `salmon index` shell-out — no
+`curl`, `wget`, `zcat`, `awk`, or `sed` involved, so macOS / Linux /
+Windows-via-WSL all behave the same.
+
+### Manual command-line fallback (if you can't run the app)
+
+If you'd rather build the reference from a terminal — for example on a
+headless cluster node, or because you want to script it into a larger
+pipeline — the rest of this section walks through the same steps by
+hand. The Reference tab does exactly what's below; the only reason to
+prefer the manual route is automation.
 
 These reads are mouse, so the reference is **GRCm39** (the current
 mouse assembly). Use **GENCODE** so transcript IDs match between the

@@ -42,6 +42,11 @@ from phosphotrap.logger import (
     tail_log,
 )
 from phosphotrap.pipeline import check_environment, run_pipeline
+from phosphotrap.reference import (
+    DEFAULT_GENCODE_MOUSE_RELEASE,
+    GencodeFiles,
+    build_reference,
+)
 from phosphotrap.samples import (
     GROUPS,
     default_sample_df,
@@ -115,7 +120,9 @@ ready_samples = ready_records(sample_records)
 # ----------------------------------------------------------------------
 st.title("Phosphoribotrap RNA-seq — 3-group (NCD / HSD1 / HSD3)")
 
-tabs = st.tabs(["Config", "Samples", "Pipeline", "Analysis", "Logs"])
+tabs = st.tabs(
+    ["Config", "Reference", "Samples", "Pipeline", "Analysis", "Logs"]
+)
 
 # ======================================================================
 # CONFIG TAB
@@ -287,9 +294,175 @@ with tabs[0]:
         st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 # ======================================================================
-# SAMPLES TAB
+# REFERENCE TAB
 # ======================================================================
 with tabs[1]:
+    st.header("Reference — GENCODE mouse + salmon index")
+    st.caption(
+        "One-button download + index build. Hides the curl / zcat / awk "
+        "song-and-dance behind a progress bar. Re-running with the same "
+        "destination is a no-op once everything is cached."
+    )
+
+    st.markdown(
+        "**What this builds:** GRCm39 transcriptome + genome from a "
+        "GENCODE mouse release, a decoy-aware `salmon index`, and a "
+        "matching `tx2gene.tsv` — the two paths the Config tab needs "
+        "to run the pipeline."
+    )
+
+    rcol1, rcol2 = st.columns(2)
+    with rcol1:
+        ref_release = st.text_input(
+            "GENCODE mouse release",
+            value=st.session_state.get(
+                "ref_release", DEFAULT_GENCODE_MOUSE_RELEASE
+            ),
+            key="ref_release",
+            help=(
+                "e.g. M38 (current as of 2025-09-02). Pick the latest "
+                "from https://ftp.ebi.ac.uk/pub/databases/gencode/"
+                "Gencode_mouse/ — only the release token changes, the "
+                "filenames are stable."
+            ),
+        )
+        default_dest = str(
+            Path.home() / "phosphotrap_refs" / f"gencode_mouse_{ref_release}"
+        )
+        ref_dest = st.text_input(
+            "Destination directory",
+            value=st.session_state.get("ref_dest", default_dest),
+            key="ref_dest",
+            help=(
+                "Where the downloads, gentrome, salmon index, and "
+                "tx2gene.tsv go. ~15 GB total. Reusable across every "
+                "mouse RNA-seq project — point it somewhere stable."
+            ),
+        )
+    with rcol2:
+        ref_threads = int(
+            st.number_input(
+                "Threads (for salmon index)",
+                min_value=1,
+                max_value=128,
+                value=int(st.session_state.get("ref_threads", cfg.threads)),
+                key="ref_threads",
+            )
+        )
+        ref_force = st.checkbox(
+            "Force rebuild (ignore cached salmon index)",
+            value=False,
+            key="ref_force",
+            help=(
+                "Downloads are still skipped if the .fa.gz / .gtf.gz "
+                "files are already on disk. Only the index rebuild is "
+                "forced."
+            ),
+        )
+
+    # Preview the URLs the build will hit so the user can sanity-check
+    # the release name before kicking off a 1 GB download.
+    try:
+        _preview = GencodeFiles.for_mouse(ref_release)
+        with st.expander("Preview download URLs", expanded=False):
+            st.code(
+                "\n".join(
+                    [
+                        _preview.transcripts_url,
+                        _preview.genome_url,
+                        _preview.gtf_url,
+                    ]
+                ),
+                language="text",
+            )
+    except ValueError as exc:
+        st.error(str(exc))
+
+    # Progress bar lives in an st.empty() so it disappears between runs
+    # — same pattern as the Pipeline tab, for the same reason (a static
+    # 1.0-filled bar after a completed run looks like work in progress).
+    ref_progress_container = st.empty()
+    ref_status_container = st.empty()
+
+    if "reference_artifacts" not in st.session_state:
+        st.session_state.reference_artifacts = None
+
+    if st.button("Build reference (download + index + tx2gene)", type="primary"):
+        progress_bar = ref_progress_container.progress(0.0, text="starting…")
+
+        def _ref_cb(frac: float, msg: str) -> None:
+            frac = max(0.0, min(1.0, float(frac)))
+            progress_bar.progress(frac, text=msg)
+
+        with st.spinner("Building reference — this takes a while…"):
+            try:
+                artifacts = build_reference(
+                    release=ref_release,
+                    dest_dir=Path(ref_dest),
+                    threads=ref_threads,
+                    force=ref_force,
+                    progress_cb=_ref_cb,
+                )
+                st.session_state.reference_artifacts = artifacts
+                ref_status_container.success(
+                    f"Built salmon index at {artifacts.index_dir} "
+                    f"and tx2gene.tsv with {artifacts.n_transcripts} transcripts."
+                )
+                logger.info(
+                    "reference build complete: index=%s tx2gene=%s n=%d",
+                    artifacts.index_dir,
+                    artifacts.tx2gene_tsv,
+                    artifacts.n_transcripts,
+                )
+            except Exception as exc:
+                logger.exception("reference build failed")
+                ref_status_container.error(f"Reference build failed: {exc}")
+                st.session_state.reference_artifacts = None
+
+    artifacts = st.session_state.get("reference_artifacts")
+    if artifacts is not None:
+        st.divider()
+        st.subheader("Build artifacts")
+        st.json(
+            {
+                "index_dir": str(artifacts.index_dir),
+                "tx2gene_tsv": str(artifacts.tx2gene_tsv),
+                "transcripts_fa": str(artifacts.transcripts_fa),
+                "genome_fa": str(artifacts.genome_fa),
+                "gtf": str(artifacts.gtf),
+                "n_transcripts": artifacts.n_transcripts,
+            }
+        )
+
+        acol1, acol2 = st.columns(2)
+        with acol1:
+            if st.button("Use these paths in Config", type="primary"):
+                cfg.salmon_index = str(artifacts.index_dir)
+                cfg.tx2gene_tsv = str(artifacts.tx2gene_tsv)
+                try:
+                    cfg.save(DEFAULT_CONFIG_PATH)
+                    st.session_state.disk_config = AppConfig.load(
+                        DEFAULT_CONFIG_PATH
+                    )
+                    st.success(
+                        f"Config updated and saved: salmon_index → "
+                        f"{artifacts.index_dir.name}/, tx2gene_tsv → "
+                        f"{artifacts.tx2gene_tsv.name}"
+                    )
+                except OSError as exc:
+                    st.error(f"Config save failed: {exc}")
+        with acol2:
+            st.caption(
+                "After clicking, switch to the Config tab to verify, then "
+                "head to Pipeline. The intermediate FASTAs and gentrome.fa.gz "
+                "can be deleted if disk is tight — only the index directory "
+                "and tx2gene.tsv are needed for downstream runs."
+            )
+
+# ======================================================================
+# SAMPLES TAB
+# ======================================================================
+with tabs[2]:
     st.header("Sample sheet (3 groups × 3 replicates × IP + INPUT)")
     st.caption(
         "Replicate IDs 2 and 7 were dropped from the cohort — numbering is "
@@ -351,7 +524,7 @@ with tabs[1]:
 # ======================================================================
 # PIPELINE TAB
 # ======================================================================
-with tabs[2]:
+with tabs[3]:
     st.header("Pipeline — fastp (optional) + salmon")
     st.caption(
         "Skip-if-cached by default; use the force_rerun checkbox in Config to override. "
@@ -426,7 +599,7 @@ with tabs[2]:
 # ======================================================================
 # ANALYSIS TAB
 # ======================================================================
-with tabs[3]:
+with tabs[4]:
     st.header("Analysis — per contrast")
 
     # Contrasts are derived from the configured reference group; fall
@@ -642,7 +815,7 @@ with tabs[3]:
 # ======================================================================
 # LOGS TAB
 # ======================================================================
-with tabs[4]:
+with tabs[5]:
     st.header("Logs")
 
     # Staged-clear pattern: if the user hit "Clear filter" on the previous
