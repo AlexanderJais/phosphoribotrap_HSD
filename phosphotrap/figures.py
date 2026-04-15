@@ -417,6 +417,15 @@ _QUICKGO_ANNOTATION_SEARCH = (
 _QUICKGO_PAGE_LIMIT = 100  # max allowed by the API
 _QUICKGO_TIMEOUT_S = 30
 _QUICKGO_USER_AGENT = "phosphoribotrap-figures/1.0"
+# GO cache schema version — bump this whenever the parser below
+# changes the set of fields it reads from a QuickGO response, or the
+# shape of the cached JSON payload. Old cache files that don't match
+# are silently refetched instead of being returned as stale. The
+# audit flagged that without this, a QuickGO field rename
+# (``symbol`` -> ``geneProductSymbol``, or similar) would have
+# required every user to manually click "force refresh" to dump
+# stale caches parsed with the old assumption set.
+_GO_CACHE_SCHEMA_VERSION = 1
 
 
 def _valid_go_id(go_id: str) -> bool:
@@ -517,9 +526,23 @@ def fetch_go_term_genes(
         if cache_path.exists() and not force_refresh:
             try:
                 payload = json.loads(cache_path.read_text())
-                cached_symbols = payload.get("symbols")
-                if isinstance(cached_symbols, list):
-                    return {str(s) for s in cached_symbols if s}
+                # Schema-version gate: a cache file without a matching
+                # schema_version was parsed by a previous build of
+                # this module whose QuickGO field-extraction logic may
+                # no longer match. Refetch rather than silently return
+                # stale strings.
+                cached_version = payload.get("schema_version")
+                if cached_version != _GO_CACHE_SCHEMA_VERSION:
+                    _logger.info(
+                        "GO cache %s has schema_version=%r "
+                        "(expected %d); refetching",
+                        cache_path, cached_version,
+                        _GO_CACHE_SCHEMA_VERSION,
+                    )
+                else:
+                    cached_symbols = payload.get("symbols")
+                    if isinstance(cached_symbols, list):
+                        return {str(s) for s in cached_symbols if s}
             except (OSError, json.JSONDecodeError) as exc:
                 _logger.warning(
                     "GO cache read failed for %s: %s — refetching",
@@ -604,6 +627,7 @@ def fetch_go_term_genes(
             cache_path.write_text(
                 json.dumps(
                     {
+                        "schema_version": _GO_CACHE_SCHEMA_VERSION,
                         "go_id": go_id,
                         "taxon": taxon,
                         "fetched_at": time.time(),

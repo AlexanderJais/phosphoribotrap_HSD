@@ -1102,6 +1102,34 @@ with tabs[3]:
     if st.session_state.pipeline_results:
         rows = [asdict(r) for r in st.session_state.pipeline_results]
         st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        # Surface non-retryable failures (binary missing, bad
+        # salmon_index / tx2gene path) prominently so the user knows
+        # toggling force_rerun will NOT help — they need to fix
+        # something first. Retryable failures (rc!=0, missing output
+        # files, I/O hiccups) are left in the table without a banner
+        # because "just click Start again" is already the obvious
+        # next step.
+        _blocked = [
+            r for r in st.session_state.pipeline_results
+            if not r.ok and not r.retryable
+        ]
+        if _blocked:
+            st.error(
+                f"**{len(_blocked)} step(s) failed with a non-retryable "
+                f"error** — these will fail again unless the underlying "
+                f"issue is fixed first (install a missing binary, or "
+                f"correct the salmon_index / tx2gene path on the Config "
+                f"tab). Toggling **Force rerun** will not help for these "
+                f"rows:\n\n"
+                + "\n".join(
+                    f"- `{r.step}` / `{r.sample}`: {r.message}"
+                    for r in _blocked[:6]
+                )
+                + (
+                    f"\n\n…and {len(_blocked) - 6} more."
+                    if len(_blocked) > 6 else ""
+                )
+            )
         st.caption(
             "Pipeline results are persisted to "
             f"`{cfg.effective_report_dir() / 'pipeline_results.json'}` "

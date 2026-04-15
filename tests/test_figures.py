@@ -503,6 +503,48 @@ def test_fetch_go_term_genes_uses_disk_cache_on_second_call(tmp_path: Path):
     assert second == {"Gal"}
 
 
+def test_fetch_go_term_genes_refetches_when_cache_schema_mismatches(
+    tmp_path: Path,
+):
+    """A cache file written by an older build of the parser (no
+    ``schema_version`` field, or a different integer) must be treated
+    as stale and refetched. Without this, a field-rename in QuickGO's
+    response would have required every user to manually click
+    "force refresh" to drop the stale parse.
+    """
+    cache_path = tmp_path / "go_GO_0007218_10090.json"
+    # Simulate a v0 cache file (pre-schema-version) with stale content
+    # that the fresh fetch will replace.
+    cache_path.write_text(
+        json.dumps({
+            "go_id": "GO:0007218",
+            "taxon": "10090",
+            "fetched_at": 0.0,
+            "symbols": ["StaleGeneFromOldSchema"],
+        })
+    )
+
+    called: list[str] = []
+
+    def stub(url: str, timeout: float) -> dict:
+        called.append(url)
+        return {
+            "pageInfo": {"current": 1, "total": 1},
+            "results": [{"symbol": "Gal"}],
+        }
+
+    out = fig_mod.fetch_go_term_genes(
+        "GO:0007218", cache_dir=tmp_path, fetcher=stub
+    )
+    # The stale v0 cache was ignored; fetcher was called; fresh result
+    # replaced the cache.
+    assert out == {"Gal"}
+    assert len(called) == 1, "fetcher should have been invoked exactly once"
+    fresh = json.loads(cache_path.read_text())
+    assert fresh["schema_version"] == fig_mod._GO_CACHE_SCHEMA_VERSION
+    assert fresh["symbols"] == ["Gal"]
+
+
 def test_fetch_go_term_genes_force_refresh_bypasses_cache(tmp_path: Path):
     """``force_refresh=True`` must skip the cache and re-hit the
     fetcher, so users on the Figures tab can click Refresh to get

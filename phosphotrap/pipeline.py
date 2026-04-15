@@ -57,6 +57,16 @@ class StepResult:
     ok: bool
     duration_s: float
     message: str
+    # Whether the failure is worth retrying without user intervention.
+    # Default True — most failures we see (transient I/O, timeouts,
+    # odd-state output dirs) can be cleared by rerunning with
+    # force_rerun=True. The explicit False signal is reserved for
+    # "the user must fix something first": binary not on PATH, a
+    # mis-pointed salmon_index directory, a missing tx2gene file.
+    # Loaded JSONs from pre-retryable StepResult runs are tolerated
+    # via load_pipeline_results' key-filter (default True kicks in
+    # for old rows). ``ok=True`` rows ignore this field.
+    retryable: bool = True
 
 
 # Filename used by ``save_pipeline_results`` / ``load_pipeline_results``
@@ -337,7 +347,8 @@ def run_fastp(
     except FileNotFoundError:
         return StepResult(
             "fastp", rec.name(), False, time.time() - start,
-            "fastp not found on PATH — install via bioconda or uncheck 'Run fastp'."
+            "fastp not found on PATH — install via bioconda or uncheck 'Run fastp'.",
+            retryable=False,
         )
     if rc != 0:
         return StepResult(
@@ -376,17 +387,20 @@ def run_salmon(
             "salmon", rec.name(), False, time.time() - start,
             f"salmon_index must be a directory containing info.json, "
             f"got: {salmon_index}",
+            retryable=False,
         )
     if not (Path(salmon_index) / "info.json").exists():
         return StepResult(
             "salmon", rec.name(), False, time.time() - start,
             f"salmon_index directory has no info.json — not a built "
             f"index: {salmon_index}",
+            retryable=False,
         )
     if not Path(tx2gene).is_file():
         return StepResult(
             "salmon", rec.name(), False, time.time() - start,
             f"tx2gene must be an existing file (tx2gene.tsv), got: {tx2gene}",
+            retryable=False,
         )
 
     if not force and quant_sf.exists() and quant_genes_sf.exists():
@@ -424,7 +438,8 @@ def run_salmon(
     except FileNotFoundError:
         return StepResult(
             "salmon", rec.name(), False, time.time() - start,
-            "salmon not found on PATH — install via bioconda."
+            "salmon not found on PATH — install via bioconda.",
+            retryable=False,
         )
     if rc != 0:
         return StepResult(
