@@ -104,14 +104,18 @@ phenoVec <- spec$phenoVec
 # controls *whether* to normalize — the *method* goes in
 # ``transformation``. Passing the method name here ("TMM-log") trips
 # anota2seqCheckParameter with "normalize parameter must be set to
-# TRUE or FALSE" and aborts before any analysis runs.
+# TRUE or FALSE" and aborts before any analysis runs. The
+# ``transformation`` argument only accepts "rlog" or "TMM-log2"
+# (anota2seqCheckParameter hard-codes that whitelist); "TMM-log" is
+# *not* accepted and aborts with "transformation parameter must be
+# either rlog or TMM-log2".
 ads <- anota2seqDataSetFromMatrix(
   dataP     = dataP,
   dataT     = dataT,
   phenoVec  = phenoVec,
   dataType  = "RNAseq",
   normalize = TRUE,
-  transformation = "TMM-log",
+  transformation = "TMM-log2",
   filterZeroGenes = TRUE,
   varCutOff = NULL
 )
