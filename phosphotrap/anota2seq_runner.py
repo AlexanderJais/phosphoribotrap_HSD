@@ -191,6 +191,15 @@ dump_one(translation,    "translation")
 dump_one(buffering,      "buffering")
 dump_one(mrna_abundance, "mrna_abundance")
 
+# Sentinel file used by the Python-side cache-hit check. Only written
+# AFTER dump_one has completed for all three regmode tables, so any
+# partial / interrupted / R-crashed run leaves the scratch dir without
+# a .done marker and the next invocation refuses the cache. The file
+# contents are an ISO-ish timestamp for human debugging; the Python
+# side only checks existence.
+writeLines(format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
+           file.path(out_dir, ".done"))
+
 cat("ok\n")
 """
 
@@ -213,8 +222,32 @@ def _build_spec(
     ips = [p.ip for p in contrast_pairs]
     ins = [p.input for p in contrast_pairs]
 
+    tx2gene_path = Path(tx2gene)
+    try:
+        tx2gene_mtime = tx2gene_path.stat().st_mtime
+    except OSError:
+        # Missing file — emit a sentinel that still participates in
+        # cache invalidation (a later rebuild will have a real mtime
+        # and mismatch this value). The R script will surface the
+        # missing-file error itself.
+        tx2gene_mtime = -1.0
+
     return {
+        # Spec schema version — bump this whenever the RSCRIPT_TEMPLATE
+        # output schema changes so existing caches are force-rerun.
+        # v1 = initial schema with gene_id + gene_name regmode TSVs and
+        # the .done sentinel marker. Kept in sync with the DESeq2
+        # runner's own _schema_version field.
+        "_schema_version": 1,
         "tx2gene": str(tx2gene),
+        # Content-drift guard: captures in-place reference rebuilds
+        # that leave the path unchanged but replace the gene_id ->
+        # gene_name mapping (e.g., GENCODE M38 -> M39). Without this,
+        # the cache-hit path would silently return stale regmode TSVs
+        # where gene_name lookups had been performed against the old
+        # tx2gene contents — exactly the "gene_name looks like
+        # gene_id" symptom we kept chasing.
+        "tx2gene_mtime": tx2gene_mtime,
         "ip_files": [str(Path(salmon_root) / r.name() / "quant.sf") for r in ips],
         "ip_names": [r.name() for r in ips],
         "input_files": [str(Path(salmon_root) / r.name() / "quant.sf") for r in ins],
@@ -236,20 +269,50 @@ def _serialise_spec(spec: dict) -> str:
 
 _ANOTA2SEQ_OUTPUT_NAMES = ("translation", "buffering", "mrna_abundance")
 _SPEC_FILENAME = "spec.json"
+# Written by the R script AFTER all three regmode TSVs have been
+# dumped; used on the Python side as the ground-truth "this run
+# completed cleanly" signal. A cache hit requires both the spec
+# match AND this marker — file existence alone isn't enough because
+# an R crash mid-write can leave truncated TSVs on disk.
+_DONE_MARKER = ".done"
 
 
-def _read_cached_outputs(scratch: Path) -> dict[str, pd.DataFrame]:
-    """Read the three TSV outputs from a scratch dir, if present."""
+def _validate_and_read_outputs(scratch: Path) -> dict[str, pd.DataFrame]:
+    """Strict: every expected TSV must exist, parse, and carry ``gene_id``.
+
+    Returns a ``{name: DataFrame}`` dict on success. Raises
+    :class:`RuntimeError` on the first failure so callers can treat a
+    corrupt / partial output dir as a hard cache miss (on the cache-
+    hit path) or a hard run failure (on the post-subprocess path)
+    instead of silently returning empty DataFrames.
+
+    A regmode table with zero significant genes is a legitimate
+    anota2seq result — the R ``dump_one`` helper writes a header-only
+    TSV in that case (``gene_id``, ``gene_name``, then the regular
+    columns). ``pd.read_csv`` on a header-only file returns an empty
+    DataFrame with the correct ``columns``, which passes the
+    ``"gene_id" in df.columns`` check below. The failure signals are:
+    missing file, ``pd.errors.EmptyDataError`` (truly empty file — R
+    crashed before writing the header), parser error on malformed
+    content, or missing ``gene_id`` header (schema drift).
+    """
     out: dict[str, pd.DataFrame] = {}
     for name in _ANOTA2SEQ_OUTPUT_NAMES:
         p = scratch / f"{name}.tsv"
-        if not p.exists() or p.stat().st_size == 0:
-            out[name] = pd.DataFrame()
-            continue
+        if not p.exists():
+            raise RuntimeError(f"expected output file missing: {p}")
         try:
-            out[name] = pd.read_csv(p, sep="\t")
-        except Exception:
-            out[name] = pd.DataFrame()
+            df = pd.read_csv(p, sep="\t")
+        except pd.errors.EmptyDataError as exc:
+            raise RuntimeError(f"output file has no header: {p}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"failed to parse {p}: {exc}") from exc
+        if "gene_id" not in df.columns:
+            raise RuntimeError(
+                f"{p} missing expected gene_id column "
+                f"(got {list(df.columns)})"
+            )
+        out[name] = df
     return out
 
 
@@ -296,11 +359,14 @@ def run_anota2seq(
     fresh_spec_text = _serialise_spec(fresh_spec)
     cached_spec_path = scratch / _SPEC_FILENAME
 
-    # Skip-if-cached only when: user hasn't forced a rerun, all three
-    # output TSVs exist, the cached spec file exists, AND the cached
-    # spec matches the fresh spec byte-for-byte after canonical
-    # sorted-key serialisation. Any mismatch (threshold change, sample
-    # order change, salmon root change) invalidates the cache.
+    # Skip-if-cached only when: user hasn't forced a rerun, the cached
+    # spec file exists AND matches the fresh spec byte-for-byte (after
+    # canonical sorted-key serialisation), the .done sentinel marker
+    # is present (proves the R script finished dump_one for all three
+    # regmodes, not just crashed mid-write), AND _validate_and_read_outputs
+    # can actually parse every expected TSV back into a DataFrame with
+    # a gene_id column. Any failure in that chain invalidates the cache
+    # and falls through to rerun.
     cached_spec_text: str | None = None
     if cached_spec_path.exists():
         try:
@@ -308,33 +374,46 @@ def run_anota2seq(
         except OSError as exc:
             logger.warning("could not read cached spec %s: %s", cached_spec_path, exc)
 
+    done_marker = scratch / _DONE_MARKER
     cache_hit = (
         not cfg.force_rerun
         and cached_spec_text == fresh_spec_text
-        and all((scratch / f"{name}.tsv").exists() for name in _ANOTA2SEQ_OUTPUT_NAMES)
+        and done_marker.exists()
     )
     if cache_hit:
-        cached = _read_cached_outputs(scratch)
-        spec_hash = hashlib.sha256(fresh_spec_text.encode()).hexdigest()[:12]
-        logger.info(
-            "anota2seq cache hit for %s (spec sha256:%s)", contrast, spec_hash
-        )
-        return Anota2seqResult(
-            contrast=contrast,
-            ok=True,
-            message=(
-                f"anota2seq cache hit for {contrast} "
-                f"(spec verified, sha256:{spec_hash})"
-            ),
-            translation=cached["translation"],
-            buffering=cached["buffering"],
-            mrna_abundance=cached["mrna_abundance"],
-            scratch_dir=scratch,
-        )
+        try:
+            cached = _validate_and_read_outputs(scratch)
+        except RuntimeError as exc:
+            # Cache dir has the spec + done marker but the TSVs are
+            # corrupt / truncated / schema-drifted. Log loudly and
+            # fall through to the rerun path rather than silently
+            # returning empty DataFrames as success.
+            logger.warning(
+                "anota2seq cache hit for %s rejected, rerunning: %s",
+                contrast, exc,
+            )
+        else:
+            spec_hash = hashlib.sha256(fresh_spec_text.encode()).hexdigest()[:12]
+            logger.info(
+                "anota2seq cache hit for %s (spec sha256:%s)", contrast, spec_hash
+            )
+            return Anota2seqResult(
+                contrast=contrast,
+                ok=True,
+                message=(
+                    f"anota2seq cache hit for {contrast} "
+                    f"(spec verified, sha256:{spec_hash})"
+                ),
+                translation=cached["translation"],
+                buffering=cached["buffering"],
+                mrna_abundance=cached["mrna_abundance"],
+                scratch_dir=scratch,
+            )
 
     # Cache miss — write the fresh spec and run R. We also stomp over
-    # any stale output TSVs so a subsequent failure can't accidentally
-    # leave a mixed cache behind.
+    # any stale output TSVs AND the .done marker so a subsequent
+    # failure can't accidentally leave a mixed cache behind that the
+    # next invocation would accept.
     cached_spec_path.write_text(fresh_spec_text)
     for name in _ANOTA2SEQ_OUTPUT_NAMES:
         stale = scratch / f"{name}.tsv"
@@ -343,6 +422,11 @@ def run_anota2seq(
                 stale.unlink()
             except OSError:
                 pass
+    if done_marker.exists():
+        try:
+            done_marker.unlink()
+        except OSError:
+            pass
 
     r_script = scratch / "run_anota2seq.R"
     r_script.write_text(RSCRIPT_TEMPLATE)
@@ -388,7 +472,46 @@ def run_anota2seq(
             scratch_dir=scratch,
         )
 
-    cached = _read_cached_outputs(scratch)
+    # Returncode 0 is necessary but not sufficient: the R script could
+    # have exited cleanly without reaching the dump_one calls (e.g.,
+    # anota2seqSelSigGenes raised and the enclosing tryCatch absorbed
+    # the error), leaving the scratch dir without a .done marker and/
+    # or without valid output TSVs. Validate both before declaring
+    # success — the previous behaviour silently returned empty
+    # DataFrames as ok=True, which the UI rendered as "analysis ran,
+    # no significant genes" instead of the real "analysis failed".
+    if not done_marker.exists():
+        return Anota2seqResult(
+            contrast=contrast,
+            ok=False,
+            message=(
+                f"anota2seq Rscript finished with rc=0 but did not "
+                f"write the .done marker — check "
+                f"{scratch / 'anota2seq.log'} for silent errors in "
+                f"anota2seqAnalyze / anota2seqSelSigGenes / "
+                f"anota2seqRegModes."
+            ),
+            translation=pd.DataFrame(),
+            buffering=pd.DataFrame(),
+            mrna_abundance=pd.DataFrame(),
+            scratch_dir=scratch,
+        )
+    try:
+        cached = _validate_and_read_outputs(scratch)
+    except RuntimeError as exc:
+        return Anota2seqResult(
+            contrast=contrast,
+            ok=False,
+            message=(
+                f"anota2seq Rscript finished with rc=0 but output "
+                f"validation failed: {exc}"
+            ),
+            translation=pd.DataFrame(),
+            buffering=pd.DataFrame(),
+            mrna_abundance=pd.DataFrame(),
+            scratch_dir=scratch,
+        )
+
     dur = time.time() - start
     return Anota2seqResult(
         contrast=contrast,

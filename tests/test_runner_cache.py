@@ -91,6 +91,10 @@ def test_anota2seq_cache_hit_when_spec_matches(tmp_path: Path):
         (scratch / f"{name}.tsv").write_text(
             "gene_id\tapvRvdPAdj\ng1\t0.01\n"
         )
+    # Completed-run sentinel — without this the cache-hit path refuses
+    # the cache because the runner can't distinguish a clean finish
+    # from an interrupted mid-write.
+    (scratch / anota2seq_runner._DONE_MARKER).write_text("test\n")
 
     with patch.object(subprocess, "run") as mock_run:
         res = anota2seq_runner.run_anota2seq(
@@ -145,10 +149,14 @@ def test_anota2seq_cache_miss_when_thresholds_change(tmp_path: Path):
     new_cfg = AppConfig(anota_delta_pt=0.2)
 
     def fake_run(cmd, **kwargs):
-        # Pretend R ran and re-wrote the output TSVs (empty but present)
-        # so the post-run _read_cached_outputs call finds something.
+        # Pretend R ran and re-wrote the output TSVs (empty but
+        # present) so the post-run output validator finds parseable
+        # files with the expected gene_id column. Also write the
+        # .done sentinel that the runner now requires as proof the
+        # R script finished dump_one for all three regmodes.
         for name in anota2seq_runner._ANOTA2SEQ_OUTPUT_NAMES:
             (scratch / f"{name}.tsv").write_text("gene_id\tfoo\n")
+        (scratch / anota2seq_runner._DONE_MARKER).write_text("test\n")
         return _fake_proc(returncode=0, stdout="ok\n")
 
     with patch.object(subprocess, "run", side_effect=fake_run) as mock_run:
@@ -194,10 +202,12 @@ def test_anota2seq_force_rerun_bypasses_matching_cache(tmp_path: Path):
     )
     for name in anota2seq_runner._ANOTA2SEQ_OUTPUT_NAMES:
         (scratch / f"{name}.tsv").write_text("gene_id\tfoo\ng1\t1\n")
+    (scratch / anota2seq_runner._DONE_MARKER).write_text("test\n")
 
     def fake_run(cmd, **kwargs):
         for name in anota2seq_runner._ANOTA2SEQ_OUTPUT_NAMES:
             (scratch / f"{name}.tsv").write_text("gene_id\tfoo\n")
+        (scratch / anota2seq_runner._DONE_MARKER).write_text("test\n")
         return _fake_proc(returncode=0, stdout="ok\n")
 
     with patch.object(subprocess, "run", side_effect=fake_run) as mock_run:
@@ -241,6 +251,8 @@ def test_deseq2_cache_hit_when_spec_matches(tmp_path: Path):
     (scratch / "interaction.tsv").write_text(
         "gene_id\tlog2FoldChange\tpvalue\ng1\t0.5\t0.01\n"
     )
+    # Completed-run sentinel (see deseq2_runner._DONE_MARKER).
+    (scratch / deseq2_runner._DONE_MARKER).write_text("test\n")
 
     with patch.object(subprocess, "run") as mock_run:
         res = deseq2_runner.run_deseq2_interaction(
@@ -300,10 +312,13 @@ def test_deseq2_cache_miss_when_sample_list_changes(tmp_path: Path):
     (scratch / "interaction.tsv").write_text("gene_id\tpvalue\ng1\t0.01\n")
 
     def fake_run(cmd, **kwargs):
-        # Simulate a successful R run that re-writes the output.
+        # Simulate a successful R run that re-writes the output and
+        # drops the .done sentinel the runner now requires as proof
+        # the R script completed write.table.
         (scratch / "interaction.tsv").write_text(
             "gene_id\tlog2FoldChange\tpvalue\ng2\t0.3\t0.05\n"
         )
+        (scratch / deseq2_runner._DONE_MARKER).write_text("test\n")
         return _fake_proc(returncode=0, stdout="ok\n")
 
     cfg = AppConfig()

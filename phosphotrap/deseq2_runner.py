@@ -113,12 +113,50 @@ out <- out[, c(lead, setdiff(colnames(out), lead)), drop = FALSE]
 write.table(out, file = file.path(out_dir, "interaction.tsv"),
             sep = "\t", row.names = FALSE, quote = FALSE)
 
+# Sentinel file used by the Python-side cache-hit check. Only written
+# AFTER write.table completes, so any partial / interrupted /
+# R-crashed run leaves the scratch dir without a .done marker and
+# the next invocation refuses the cache.
+writeLines(format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
+           file.path(out_dir, ".done"))
+
 cat("ok\n")
 """
 
 
 _DESEQ2_OUTPUT_NAME = "interaction.tsv"
 _SPEC_FILENAME = "spec.json"
+# Written by the R script AFTER write.table completes; Python-side
+# cache-hit check requires it so a truncated / crashed run is not
+# silently returned as success. Matches the anota2seq runner's
+# convention (phosphotrap.anota2seq_runner._DONE_MARKER).
+_DONE_MARKER = ".done"
+
+
+def _validate_and_read_output(cached_table: Path) -> pd.DataFrame:
+    """Strict read: interaction.tsv must exist, parse, and carry ``gene_id``.
+
+    Raises :class:`RuntimeError` on failure so both the cache-hit path
+    and the post-subprocess path can treat a corrupt / truncated file
+    as a hard failure instead of silently substituting an empty
+    DataFrame. A legitimate zero-row result (no genes survive the
+    interaction term) still passes this validator because the R
+    script always writes the header row with ``gene_id`` + ``gene_name``.
+    """
+    if not cached_table.exists():
+        raise RuntimeError(f"expected output file missing: {cached_table}")
+    try:
+        df = pd.read_csv(cached_table, sep="\t")
+    except pd.errors.EmptyDataError as exc:
+        raise RuntimeError(f"output file has no header: {cached_table}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"failed to parse {cached_table}: {exc}") from exc
+    if "gene_id" not in df.columns:
+        raise RuntimeError(
+            f"{cached_table} missing expected gene_id column "
+            f"(got {list(df.columns)})"
+        )
+    return df
 
 
 def _build_spec(
@@ -134,15 +172,28 @@ def _build_spec(
         subset.append(p.ip)
         subset.append(p.input)
 
+    tx2gene_path = Path(tx2gene)
+    try:
+        tx2gene_mtime = tx2gene_path.stat().st_mtime
+    except OSError:
+        tx2gene_mtime = -1.0
+
     return {
         # Spec schema version — bump this whenever the on-disk output
-        # schema changes so existing caches are force-rerun. v2 adds
-        # the ``gene_name`` column to interaction.tsv (the R script
-        # inserts it as the second column, right after gene_id). A
-        # stale v1 cache has no ``gene_name`` column and would
-        # otherwise be returned as a cache hit.
-        "_schema_version": 2,
+        # schema changes so existing caches are force-rerun.
+        #   v1: original interaction.tsv with only gene_id.
+        #   v2: interaction.tsv with gene_id + gene_name.
+        #   v3: adds the .done sentinel marker and tx2gene_mtime
+        #       content-drift guard (see below).
+        "_schema_version": 3,
         "tx2gene": str(tx2gene),
+        # Content-drift guard: captures in-place reference rebuilds
+        # that leave the path unchanged but replace the gene_id ->
+        # gene_name mapping (e.g., GENCODE M38 -> M39). Without this,
+        # the cache-hit path would silently return a stale
+        # interaction.tsv where the gene_name column had been
+        # populated from the old tx2gene contents.
+        "tx2gene_mtime": tx2gene_mtime,
         "ref_group": ref_group,
         "alt_group": alt_group,
         "files": [str(Path(salmon_root) / r.name() / "quant.sf") for r in subset],
@@ -192,6 +243,7 @@ def run_deseq2_interaction(
     fresh_spec_text = _serialise_spec(fresh_spec)
     cached_spec_path = scratch / _SPEC_FILENAME
     cached_table = scratch / _DESEQ2_OUTPUT_NAME
+    done_marker = scratch / _DONE_MARKER
 
     cached_spec_text: str | None = None
     if cached_spec_path.exists():
@@ -203,12 +255,22 @@ def run_deseq2_interaction(
     cache_hit = (
         not cfg.force_rerun
         and cached_spec_text == fresh_spec_text
-        and cached_table.exists()
-        and cached_table.stat().st_size > 0
+        and done_marker.exists()
     )
     if cache_hit:
         try:
-            table = pd.read_csv(cached_table, sep="\t")
+            table = _validate_and_read_output(cached_table)
+        except RuntimeError as exc:
+            # Cache dir has spec + .done but the TSV is corrupt /
+            # truncated / schema-drifted. Log loudly and fall through
+            # to the rerun path — but also clean the marker so a
+            # failing rerun can't leave behind a zombie cache that the
+            # NEXT invocation would accept.
+            logger.warning(
+                "DESeq2 cache hit for %s rejected, rerunning: %s",
+                contrast, exc,
+            )
+        else:
             spec_hash = hashlib.sha256(fresh_spec_text.encode()).hexdigest()[:12]
             logger.info(
                 "DESeq2 cache hit for %s (spec sha256:%s)", contrast, spec_hash
@@ -223,14 +285,20 @@ def run_deseq2_interaction(
                 table=table,
                 scratch_dir=scratch,
             )
-        except Exception as exc:
-            logger.warning("DESeq2 cache read failed for %s: %s", contrast, exc)
 
-    # Cache miss — write the fresh spec, clear any stale output, run R.
+    # Cache miss — write the fresh spec, clear any stale output AND
+    # the .done marker, run R. If we left a stale .done behind and the
+    # rerun crashed, the next cache-hit check would accept the marker
+    # against the new (still-stale) TSV.
     cached_spec_path.write_text(fresh_spec_text)
     if cached_table.exists():
         try:
             cached_table.unlink()
+        except OSError:
+            pass
+    if done_marker.exists():
+        try:
+            done_marker.unlink()
         except OSError:
             pass
 
@@ -270,12 +338,37 @@ def run_deseq2_interaction(
             scratch_dir=scratch,
         )
 
-    table = pd.DataFrame()
-    if cached_table.exists() and cached_table.stat().st_size > 0:
-        try:
-            table = pd.read_csv(cached_table, sep="\t")
-        except Exception:
-            table = pd.DataFrame()
+    # Returncode 0 is necessary but not sufficient — validate that the
+    # .done marker and a parseable interaction.tsv were actually
+    # written. The previous behaviour silently substituted an empty
+    # DataFrame on any parse error and still returned ok=True, which
+    # the UI rendered as "DESeq2 succeeded with zero genes" instead of
+    # the real "R crashed between DESeq and write.table".
+    if not done_marker.exists():
+        return DESeq2Result(
+            contrast=contrast,
+            ok=False,
+            message=(
+                f"DESeq2 Rscript finished with rc=0 but did not write "
+                f"the .done marker — check {scratch / 'deseq2.log'} "
+                f"for silent errors between DESeq() and write.table()."
+            ),
+            table=pd.DataFrame(),
+            scratch_dir=scratch,
+        )
+    try:
+        table = _validate_and_read_output(cached_table)
+    except RuntimeError as exc:
+        return DESeq2Result(
+            contrast=contrast,
+            ok=False,
+            message=(
+                f"DESeq2 Rscript finished with rc=0 but output "
+                f"validation failed: {exc}"
+            ),
+            table=pd.DataFrame(),
+            scratch_dir=scratch,
+        )
 
     return DESeq2Result(
         contrast=contrast,
