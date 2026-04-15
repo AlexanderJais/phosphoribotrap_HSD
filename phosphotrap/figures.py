@@ -29,6 +29,7 @@ can populate the field out of the box.
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -127,6 +128,31 @@ def _theme_with_title(base_font_size: int, title: str) -> dict:
 # ----------------------------------------------------------------------
 # Gene symbol resolution
 # ----------------------------------------------------------------------
+# GENCODE Ensembl IDs carry a numeric version suffix
+# (``ENSMUSG00000051951.6`` — the ``.6`` increments whenever the gene's
+# sequence/annotation is updated within the same stable ID). Biomart,
+# Ensembl REST, and some downstream tools strip the suffix; GENCODE
+# GTFs, tximport, salmon quant.genes.sf, and anota2seq / DESeq2 all
+# preserve it. If the tx2gene TSV and the counts matrix disagree on
+# whether versions are present, every gene_id lookup silently returns
+# NaN → prepend_gene_name falls back to gene_id → the downloaded TSV
+# looks like it contains Ensembl IDs where gene_names should be.
+# We defend against that by (a) populating both the versioned and the
+# version-stripped key in every gene_id-keyed map produced in this
+# module, and (b) retrying failed lookups against the stripped form
+# inside prepend_gene_name / resolve_symbols.
+_GENE_ID_VERSION_RE = re.compile(r"\.\d+$")
+
+
+def _strip_gene_id_version(gene_id: str) -> str:
+    """Return ``gene_id`` without a trailing ``.<digits>`` suffix.
+
+    Idempotent on already-stripped IDs; leaves non-GENCODE IDs
+    (anything not ending in ``.<digits>``) untouched.
+    """
+    return _GENE_ID_VERSION_RE.sub("", gene_id)
+
+
 def load_gene_symbol_map(tx2gene_path: Path) -> dict[str, str]:
     """Build a case-insensitive ``{gene_symbol_lower: gene_id}`` map.
 
@@ -159,6 +185,9 @@ def load_gene_symbol_map(tx2gene_path: Path) -> dict[str, str]:
             _tid, gene_id, gene_symbol = parts[0], parts[1], parts[2]
             if not gene_symbol or not gene_id:
                 continue
+            # Store the gene_id as-is (preserving any version suffix
+            # from the tx2gene). Version-tolerant lookup happens on
+            # the consumer side via ``_strip_gene_id_version``.
             out[gene_symbol.lower()] = gene_id
     return out
 
@@ -174,6 +203,17 @@ def load_gene_id_to_name_map(tx2gene_path: Path) -> dict[str, str]:
     For the older 2-column format (no symbol column) the returned map
     is empty; callers should treat an empty map as "fall back to
     printing gene_ids" rather than raising.
+
+    **Version-tolerant lookup.** GENCODE gene_ids carry a numeric
+    version suffix (``ENSMUSG00000051951.6``). Upstream tooling varies
+    on whether it keeps or strips the suffix, so the returned map
+    contains **both** the versioned key (as read from the TSV) *and*
+    the version-stripped key (via :func:`_strip_gene_id_version`).
+    The versioned key is inserted first so ``setdefault`` keeps it
+    authoritative — the stripped key only fills in when no versioned
+    entry already exists. This lets :func:`prepend_gene_name` match
+    DataFrames that use either convention without the caller needing
+    to know which one the tx2gene was built with.
 
     Raises :class:`FileNotFoundError` if the path doesn't exist. Silently
     skips malformed rows. Compared to :func:`load_gene_symbol_map`, this
@@ -196,7 +236,47 @@ def load_gene_id_to_name_map(tx2gene_path: Path) -> dict[str, str]:
             if not gene_id or not gene_symbol:
                 continue
             out.setdefault(gene_id, gene_symbol)
+            # Also register the version-stripped form so downstream
+            # DataFrames that drop the suffix still resolve. No-op on
+            # unversioned IDs because _strip_gene_id_version is the
+            # identity on anything without a trailing .<digits>.
+            stripped = _strip_gene_id_version(gene_id)
+            if stripped != gene_id:
+                out.setdefault(stripped, gene_symbol)
     return out
+
+
+def _version_tolerant_name_lookup(
+    id_series: "pd.Series",
+    id_to_name: dict[str, str],
+) -> "pd.Series":
+    """Map ``id_series`` -> gene_name, retrying the stripped form.
+
+    Two-pass lookup:
+
+    1. First pass: exact match against ``id_to_name`` (which already
+       carries both versioned and version-stripped keys courtesy of
+       :func:`load_gene_id_to_name_map`). This handles the common
+       case where the DataFrame uses the same convention as the
+       tx2gene TSV.
+    2. Second pass: for rows still missing after pass 1, strip the
+       version suffix from the *input* gene_id and retry. This
+       handles the awkward reverse case — the tx2gene was built with
+       an unversioned GTF (no entries with a ``.<digits>`` form to
+       register), but the DataFrame comes from a salmon output that
+       kept versions. Pass 2 rescues those rows.
+
+    Any row still unresolved falls back to the input gene_id itself,
+    so a missing symbol is never an empty cell — the row is still
+    identifiable in the downloaded TSV.
+    """
+    names = id_series.map(id_to_name)
+    missing = names.isna()
+    if missing.any():
+        stripped = id_series[missing].map(_strip_gene_id_version)
+        retry = stripped.map(id_to_name)
+        names.loc[missing] = retry
+    return names.fillna(id_series)
 
 
 def prepend_gene_name(
@@ -244,7 +324,7 @@ def prepend_gene_name(
         if out.columns[0] != "gene_id":
             out = out.rename(columns={out.columns[0]: "gene_id"})
         id_series = out["gene_id"].astype(str)
-        names = id_series.map(id_to_name).fillna(id_series)
+        names = _version_tolerant_name_lookup(id_series, id_to_name)
         out.insert(1, "gene_name", names)
         return out
 
@@ -255,7 +335,7 @@ def prepend_gene_name(
         )
     out = df.copy()
     id_series = out[id_col].astype(str)
-    names = id_series.map(id_to_name).fillna(id_series)
+    names = _version_tolerant_name_lookup(id_series, id_to_name)
     insert_at = out.columns.get_loc(id_col) + 1
     # Drop any pre-existing gene_name column to avoid ``cannot insert
     # column, already exists`` from pandas. We always take the fresh

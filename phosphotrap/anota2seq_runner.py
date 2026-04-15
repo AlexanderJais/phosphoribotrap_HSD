@@ -372,7 +372,16 @@ def run_anota2seq(
         try:
             cached_spec_text = cached_spec_path.read_text()
         except OSError as exc:
-            logger.warning("could not read cached spec %s: %s", cached_spec_path, exc)
+            # File exists but can't be read — permission issue,
+            # truncated JSON from an interrupted write, stale NFS
+            # handle, etc. Surface it explicitly so the subsequent
+            # "cache miss, rerunning" log line isn't confused with a
+            # normal "no prior run" cache miss.
+            logger.warning(
+                "anota2seq cached spec %s exists but is unreadable "
+                "(%s); treating as cache miss and rerunning",
+                cached_spec_path, exc,
+            )
 
     done_marker = scratch / _DONE_MARKER
     cache_hit = (

@@ -19,6 +19,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.io as pio
 import streamlit as st
 
 from phosphotrap.anota2seq_runner import run_anota2seq
@@ -137,7 +138,9 @@ disk_cfg: AppConfig = st.session_state.disk_config
 
 
 @st.cache_data(show_spinner=False)
-def _cached_symbol_map(tx2gene_path: str, mtime: float) -> dict[str, str]:
+def _cached_symbol_map(
+    tx2gene_path: str, mtime: float, size: int
+) -> dict[str, str]:
     """Cached wrapper around ``phosphotrap.figures.load_gene_symbol_map``.
 
     The raw helper reparses the full tx2gene TSV on every call — for
@@ -147,25 +150,27 @@ def _cached_symbol_map(tx2gene_path: str, mtime: float) -> dict[str, str]:
     tab) would re-parse it on every keystroke in any tab. That's
     enough latency to show up as visible UI lag.
 
-    The ``mtime`` argument is the cache-invalidation key — Streamlit
-    re-runs the wrapped function only when the argument tuple
-    changes. Passing the file's ``mtime`` alongside its path means
-    the cache refreshes automatically when the Reference tab
-    rebuilds the reference and writes a new tx2gene.tsv.
+    The cache key is ``(path, mtime, size)`` — Streamlit re-runs the
+    wrapped function only when the argument tuple changes. ``size``
+    is included alongside ``mtime`` because some filesystems have
+    coarse mtime resolution (ext4 without tail packing, FAT32, NFS
+    over sub-second network jitter), and an in-place rewrite that
+    lands within the same mtime tick would otherwise return a stale
+    cached map. Path + mtime + size is a robust-enough triple that
+    collides only on a genuine no-op overwrite.
     """
     return load_gene_symbol_map(Path(tx2gene_path))
 
 
 @st.cache_data(show_spinner=False)
-def _cached_id_to_name_map(tx2gene_path: str, mtime: float) -> dict[str, str]:
+def _cached_id_to_name_map(
+    tx2gene_path: str, mtime: float, size: int
+) -> dict[str, str]:
     """Cached ``{gene_id: gene_name}`` map for exportable-file
     augmentation.
 
-    Same caching rationale as :func:`_cached_symbol_map` — the tx2gene
-    TSV is ~278 k rows on GENCODE mouse M38 and reparsing it on every
-    Streamlit rerun would make the Analysis-tab download buttons feel
-    sluggish. Invalidated by the tx2gene mtime so a Reference-tab
-    rebuild automatically refreshes this map on the next rerun.
+    Same caching rationale and ``(path, mtime, size)`` invalidation
+    triple as :func:`_cached_symbol_map`.
     """
     return load_gene_id_to_name_map(Path(tx2gene_path))
 
@@ -185,10 +190,61 @@ def _load_id_to_name_or_empty(tx2gene_path: str) -> dict[str, str]:
         path = Path(tx2gene_path)
         if not path.exists():
             return {}
-        return _cached_id_to_name_map(str(path), path.stat().st_mtime)
+        stat = path.stat()
+        return _cached_id_to_name_map(str(path), stat.st_mtime, stat.st_size)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("could not build gene_id -> gene_name map: %s", exc)
         return {}
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def _df_to_tsv(df: pd.DataFrame, *, header: bool = True) -> str:
+    """Cached TSV serialisation for Analysis-tab download buttons.
+
+    ``st.download_button`` regenerates its ``data=`` payload on every
+    Streamlit rerun — and every keystroke in any tab triggers a rerun.
+    For a 10k-row analysis table ``pd.DataFrame.to_csv`` is ~30-50 ms,
+    and the Analysis tab has ~9 download buttons, so naively that's
+    ~300-450 ms of pure serialisation overhead on every keystroke.
+
+    Streamlit hashes pandas DataFrames via ``hash_pandas_object``
+    (content-addressable), so the cache refreshes automatically when
+    the upstream analysis writes a new table to session state. Header-
+    less output (used by the preranked ``.rnk`` download) is a second
+    cache entry via the keyword arg.
+    """
+    return df.to_csv(sep="\t", index=False, header=header)
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _cached_fig_html(fig_json: str) -> str:
+    """Cached plotly HTML export keyed on the figure's JSON form.
+
+    ``fig.to_html`` is ~300-500 ms for a 50k-point volcano. The
+    Figures tab's :func:`_figure_download_row` previously regenerated
+    the HTML on every rerun, which compounded with the SVG / PNG
+    exports below. Keying on ``fig.to_json()`` (deterministic,
+    ~50-200 ms, cheaper than the re-export) and caching the result
+    eliminates the repeat cost on unchanged figures.
+    """
+    fig = pio.from_json(fig_json)
+    return fig.to_html(full_html=True, include_plotlyjs="cdn")
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def _cached_fig_image(
+    fig_json: str, fmt: str
+) -> tuple[bytes | None, str | None]:
+    """Cached plotly SVG / PNG export via ``figure_export_bytes``.
+
+    ``kaleido``-backed image export is 1-2 s for a volcano with 50k
+    points — the dominant cost on the Figures tab. Same cache-key
+    strategy as :func:`_cached_fig_html`. Returns ``(bytes, None)`` on
+    success or ``(None, error_message)`` when kaleido is unavailable /
+    fails, matching :func:`phosphotrap.figures.figure_export_bytes`.
+    """
+    fig = pio.from_json(fig_json)
+    return figure_export_bytes(fig, fmt)
 
 
 def _figure_download_row(fig, basename: str) -> None:
@@ -203,11 +259,19 @@ def _figure_download_row(fig, basename: str) -> None:
     seeds both the file names AND the Streamlit widget keys so
     multiple download rows on the same rerun don't collide.
     """
+    # Serialise the figure once and route all three exports through
+    # the cached helpers. ``fig.to_json()`` is ~50-200 ms for a 50k-
+    # point volcano — cheaper than to_html (~300-500 ms) and much
+    # cheaper than to_image (~1-2 s via kaleido). The cached helpers
+    # key on the serialised form so unchanged figures return instantly
+    # on subsequent reruns.
+    fig_json = fig.to_json()
+
     col_html, col_svg, col_png = st.columns(3)
     with col_html:
         st.download_button(
             "Download HTML",
-            data=fig.to_html(full_html=True, include_plotlyjs="cdn"),
+            data=_cached_fig_html(fig_json),
             file_name=f"{basename}.html",
             mime="text/html",
             key=f"fig_dl_html_{basename}",
@@ -217,12 +281,13 @@ def _figure_download_row(fig, basename: str) -> None:
         (col_png, "png", "image/png"),
     ):
         with col:
-            # figure_export_bytes centralises the ``fig.to_image``
-            # try/except so the decision logic (success vs. caption
-            # fallback) can be unit-tested without a Streamlit
-            # runtime. See phosphotrap.figures.figure_export_bytes
-            # and tests/test_figures.py for the coverage.
-            img_bytes, err = figure_export_bytes(fig, fmt)
+            # _cached_fig_image delegates to figure_export_bytes,
+            # which centralises the ``fig.to_image`` try/except so
+            # the decision logic (success vs. caption fallback) can
+            # be unit-tested without a Streamlit runtime. See
+            # phosphotrap.figures.figure_export_bytes and
+            # tests/test_figures.py for the coverage.
+            img_bytes, err = _cached_fig_image(fig_json, fmt)
             if err is not None:
                 st.caption(
                     f"Install `kaleido` for {fmt.upper()} export "
@@ -1132,7 +1197,7 @@ with tabs[4]:
         _fpkm_export = prepend_gene_name(matrices["fpkm"], _id_to_name)
         st.download_button(
             "Download FPKM TSV",
-            data=_fpkm_export.to_csv(sep="\t", index=False),
+            data=_df_to_tsv(_fpkm_export),
             file_name="phosphotrap_fpkm.tsv",
             mime="text/tab-separated-values",
         )
@@ -1233,7 +1298,7 @@ with tabs[4]:
         _mw_export = prepend_gene_name(cr.table, _id_to_name)
         st.download_button(
             f"Download full table ({contrast})",
-            data=_mw_export.to_csv(sep="\t", index=False),
+            data=_df_to_tsv(_mw_export),
             file_name=f"mannwhitney_{contrast}.tsv",
             mime="text/tab-separated-values",
         )
@@ -1260,7 +1325,7 @@ with tabs[4]:
             _ranked_export = _ranked_export[["gene_id", "score"]]
         st.download_button(
             f"Download preranked (.rnk) ({contrast})",
-            data=_ranked_export.to_csv(sep="\t", index=False, header=False),
+            data=_df_to_tsv(_ranked_export, header=False),
             file_name=f"preranked_{contrast}.rnk",
             mime="text/tab-separated-values",
             help=(
@@ -1347,9 +1412,7 @@ with tabs[4]:
             if not anota.translation.empty:
                 st.download_button(
                     f"Download translation ({contrast})",
-                    data=_augmented_anota(anota.translation).to_csv(
-                        sep="\t", index=False
-                    ),
+                    data=_df_to_tsv(_augmented_anota(anota.translation)),
                     file_name=f"anota2seq_translation_{contrast}.tsv",
                     mime="text/tab-separated-values",
                     key=f"anota_translation_dl_{contrast}",
@@ -1359,9 +1422,7 @@ with tabs[4]:
             if not anota.buffering.empty:
                 st.download_button(
                     f"Download buffering ({contrast})",
-                    data=_augmented_anota(anota.buffering).to_csv(
-                        sep="\t", index=False
-                    ),
+                    data=_df_to_tsv(_augmented_anota(anota.buffering)),
                     file_name=f"anota2seq_buffering_{contrast}.tsv",
                     mime="text/tab-separated-values",
                     key=f"anota_buffering_dl_{contrast}",
@@ -1371,9 +1432,7 @@ with tabs[4]:
             if not anota.mrna_abundance.empty:
                 st.download_button(
                     f"Download mRNA abundance ({contrast})",
-                    data=_augmented_anota(anota.mrna_abundance).to_csv(
-                        sep="\t", index=False
-                    ),
+                    data=_df_to_tsv(_augmented_anota(anota.mrna_abundance)),
                     file_name=f"anota2seq_mrna_abundance_{contrast}.tsv",
                     mime="text/tab-separated-values",
                     key=f"anota_mrna_dl_{contrast}",
@@ -1394,7 +1453,7 @@ with tabs[4]:
             _deseq_export = deseq.table
         st.download_button(
             f"Download DESeq2 interaction ({contrast})",
-            data=_deseq_export.to_csv(sep="\t", index=False),
+            data=_df_to_tsv(_deseq_export),
             file_name=f"deseq2_interaction_{contrast}.tsv",
             mime="text/tab-separated-values",
         )
@@ -1679,11 +1738,14 @@ with tabs[5]:
         )
     else:
         try:
-            # Cached by (path, mtime) so the 278 k-row tx2gene isn't
-            # re-parsed on every rerun. See ``_cached_symbol_map`` for
-            # the rationale.
-            _mtime = Path(cfg.tx2gene_tsv).stat().st_mtime
-            _symbol_map = _cached_symbol_map(cfg.tx2gene_tsv, _mtime)
+            # Cached by (path, mtime, size) so the 278 k-row tx2gene
+            # isn't re-parsed on every rerun. See ``_cached_symbol_map``
+            # for the rationale on using the triple instead of just
+            # (path, mtime).
+            _stat = Path(cfg.tx2gene_tsv).stat()
+            _symbol_map = _cached_symbol_map(
+                cfg.tx2gene_tsv, _stat.st_mtime, _stat.st_size
+            )
         except FileNotFoundError as exc:
             _symbol_map = {}
             st.error(f"Could not read tx2gene: {exc}")
@@ -2019,7 +2081,7 @@ with tabs[5]:
                 )
                 st.download_button(
                     "Download regmode table (TSV)",
-                    data=_regmode_df.to_csv(sep="\t", index=False),
+                    data=_df_to_tsv(_regmode_df),
                     file_name="highlighted_regmode.tsv",
                     mime="text/tab-separated-values",
                     key="fig_regmode_tsv_dl",

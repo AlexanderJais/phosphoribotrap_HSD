@@ -249,6 +249,65 @@ def test_prepend_gene_name_from_column_missing_col_raises():
         fig_mod.prepend_gene_name(df, {}, id_col="gene_id")
 
 
+def test_load_gene_id_to_name_map_registers_version_stripped_key(tmp_path: Path):
+    """GENCODE gene_ids carry a ``.<digits>`` version suffix. The
+    loader stores both the versioned key (as read) and the stripped
+    form so downstream lookups tolerate either convention — otherwise
+    a DataFrame built from an unversioned GTF silently resolves to
+    NaN and prepend_gene_name falls back to gene_id, producing the
+    "gene_name looks like gene_id" symptom we kept chasing.
+    """
+    tx2 = tmp_path / "tx2gene.tsv"
+    tx2.write_text(
+        "ENSMUST00000000001.5\tENSMUSG00000051951.6\tXkr4\n"
+        "ENSMUST00000000002.8\tENSMUSG00000025900.13\tRp1\n"
+    )
+    m = fig_mod.load_gene_id_to_name_map(tx2)
+    # Versioned keys (preserved verbatim from the TSV)
+    assert m["ENSMUSG00000051951.6"] == "Xkr4"
+    assert m["ENSMUSG00000025900.13"] == "Rp1"
+    # Stripped keys (synthesised by _strip_gene_id_version)
+    assert m["ENSMUSG00000051951"] == "Xkr4"
+    assert m["ENSMUSG00000025900"] == "Rp1"
+
+
+def test_prepend_gene_name_version_tolerant_lookup_stripped_df():
+    """DataFrame carries version-stripped gene_ids, map was built
+    from a versioned tx2gene. The augmented output should still show
+    the real gene_name (via the stripped-key entries registered by
+    load_gene_id_to_name_map), not fall back to gene_id.
+    """
+    df = pd.DataFrame(
+        {"delta_log2": [1.0, -0.5]},
+        index=["ENSMUSG00000051951", "ENSMUSG00000025900"],
+    )
+    id_to_name = {
+        # Only versioned keys — simulating a caller that didn't go
+        # through load_gene_id_to_name_map's setdefault-stripped step.
+        "ENSMUSG00000051951.6": "Xkr4",
+        "ENSMUSG00000025900.13": "Rp1",
+    }
+    out = fig_mod.prepend_gene_name(df, id_to_name)
+    assert out["gene_name"].tolist() == ["Xkr4", "Rp1"]
+
+
+def test_prepend_gene_name_version_tolerant_lookup_versioned_df():
+    """The reverse: DataFrame carries versioned gene_ids, map was
+    built from an unversioned tx2gene. The exact match fails but
+    the stripped retry in _version_tolerant_name_lookup rescues it.
+    """
+    df = pd.DataFrame(
+        {"gene_id": ["ENSMUSG00000051951.6", "ENSMUSG00000025900.13"],
+         "log2FC": [0.3, -0.2]}
+    )
+    id_to_name = {
+        "ENSMUSG00000051951": "Xkr4",
+        "ENSMUSG00000025900": "Rp1",
+    }
+    out = fig_mod.prepend_gene_name(df, id_to_name, id_col="gene_id")
+    assert out["gene_name"].tolist() == ["Xkr4", "Rp1"]
+
+
 def test_prepend_gene_name_empty_dataframe():
     """Empty input returns a frame with the gene_name column added,
     not a crash. Download buttons in the UI sometimes fire against

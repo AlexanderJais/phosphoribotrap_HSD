@@ -250,7 +250,14 @@ def run_deseq2_interaction(
         try:
             cached_spec_text = cached_spec_path.read_text()
         except OSError as exc:
-            logger.warning("could not read cached spec %s: %s", cached_spec_path, exc)
+            # See the matching block in anota2seq_runner.run_anota2seq
+            # for the rationale on escalating this from a silent
+            # fall-through to an explicit warning.
+            logger.warning(
+                "DESeq2 cached spec %s exists but is unreadable "
+                "(%s); treating as cache miss and rerunning",
+                cached_spec_path, exc,
+            )
 
     cache_hit = (
         not cfg.force_rerun
