@@ -1101,12 +1101,24 @@ with tabs[4]:
     # buttons still work, they just can't add gene_name.
     _id_to_name = _load_id_to_name_or_empty(cfg.tx2gene_tsv)
     if not _id_to_name and cfg.tx2gene_tsv:
-        st.caption(
-            "ℹ️ Gene-symbol annotation unavailable: tx2gene.tsv has no "
-            "third column, or the path is missing. Downloaded tables "
-            "will carry only Ensembl ``gene_id`` strings. Rebuild the "
-            "reference from the Reference tab to get a 3-column "
-            "tx2gene with gene names."
+        # Escalated from st.caption -> st.error: users kept missing
+        # the grey footnote and complaining that downloads contained
+        # only Ensembl IDs. Make the degradation path impossible to
+        # ignore: the download buttons below will still work, but
+        # their ``gene_name`` column will be a duplicate of ``gene_id``
+        # until the user rebuilds the reference.
+        st.error(
+            "❌ **Gene symbols unavailable — downloads will contain "
+            "Ensembl gene_ids only.**  \n"
+            "Your ``tx2gene.tsv`` is missing or has no third "
+            "(``gene_name``) column, so the Analysis-tab exports "
+            "cannot inject human-readable symbols. The ``gene_name`` "
+            "column in the downloaded TSVs will be a duplicate of "
+            "``gene_id``.  \n"
+            "**Fix:** go to the Reference tab and click **Rebuild "
+            "reference**. That writes a fresh 3-column tx2gene.tsv "
+            "(``transcript_id⇥gene_id⇥gene_name``) from the GTF, and "
+            "this tab will pick it up on the next rerun."
         )
 
     matrices = st.session_state.get("salmon_matrices")

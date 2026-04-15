@@ -48,10 +48,28 @@ dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
 spec <- jsonlite::fromJSON(spec_path)
 
-tx2g <- read.table(spec$tx2gene, sep = "\t", header = FALSE,
-                   stringsAsFactors = FALSE)
-tx2g <- tx2g[, 1:2]
+tx2g_raw <- read.table(spec$tx2gene, sep = "\t", header = FALSE,
+                       stringsAsFactors = FALSE)
+tx2g <- tx2g_raw[, 1:2]
 colnames(tx2g) <- c("TXNAME", "GENEID")
+
+# Build a gene_id -> gene_name map from the 3rd column (if present)
+# so the interaction.tsv carries human-readable MGI / HGNC symbols
+# alongside the Ensembl gene_ids that tximport aggregates on. This
+# matches the behaviour of the anota2seq runner (see
+# phosphotrap/anota2seq_runner.py dump_one) so every TSV the pipeline
+# writes to disk is readable without a second lookup. Falls back
+# gracefully to a gene_id-as-gene_name copy for legacy 2-column
+# tx2gene files — the user gets a hint in the Analysis tab if that
+# degradation kicks in.
+if (ncol(tx2g_raw) >= 3) {
+  gene_name_map <- tapply(
+    tx2g_raw[, 3], tx2g_raw[, 2],
+    function(x) x[!is.na(x) & nzchar(x)][1]
+  )
+} else {
+  gene_name_map <- setNames(character(0), character(0))
+}
 
 files <- spec$files
 names(files) <- spec$names
@@ -79,8 +97,19 @@ if (!(interaction_name %in% res_names)) {
 
 res <- results(dds, name = interaction_name)
 out <- as.data.frame(res)
-out$gene_id <- rownames(out)
-out <- out[, c("gene_id", setdiff(colnames(out), "gene_id"))]
+gene_ids <- rownames(out)
+out$gene_id <- gene_ids
+# Insert gene_name right after gene_id so the TSV is readable at a
+# glance. Unmapped gene_ids fall back to the gene_id itself so a
+# missing symbol never becomes a silent empty cell.
+if (length(gene_name_map) > 0) {
+  out$gene_name <- unname(gene_name_map[gene_ids])
+  out$gene_name[is.na(out$gene_name)] <- gene_ids[is.na(out$gene_name)]
+} else {
+  out$gene_name <- gene_ids
+}
+lead <- c("gene_id", "gene_name")
+out <- out[, c(lead, setdiff(colnames(out), lead)), drop = FALSE]
 write.table(out, file = file.path(out_dir, "interaction.tsv"),
             sep = "\t", row.names = FALSE, quote = FALSE)
 
@@ -106,6 +135,13 @@ def _build_spec(
         subset.append(p.input)
 
     return {
+        # Spec schema version — bump this whenever the on-disk output
+        # schema changes so existing caches are force-rerun. v2 adds
+        # the ``gene_name`` column to interaction.tsv (the R script
+        # inserts it as the second column, right after gene_id). A
+        # stale v1 cache has no ``gene_name`` column and would
+        # otherwise be returned as a cache hit.
+        "_schema_version": 2,
         "tx2gene": str(tx2gene),
         "ref_group": ref_group,
         "alt_group": alt_group,
