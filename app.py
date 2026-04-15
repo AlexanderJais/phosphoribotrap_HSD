@@ -1425,6 +1425,25 @@ with tabs[5]:
     )
     st.session_state.setdefault("widget_fig_volcano_filter_enabled", False)
 
+    # Drain any pending widget seeds queued by a button handler in the
+    # previous script run. Streamlit raises ``StreamlitAPIException``
+    # when ``st.session_state[<widget_key>] = ...`` runs after the
+    # widget with that key has already been instantiated in the same
+    # run, so buttons that want to populate a text_area / checkbox
+    # instead write to ``_pending_<key>`` and call ``st.rerun()``. This
+    # block fires BEFORE any widgets below are built, so the transfer
+    # into the real widget keys is legal.
+    for _pending_widget_key in (
+        "widget_fig_primary_highlights",
+        "widget_fig_volcano_filter_text",
+        "widget_fig_volcano_filter_enabled",
+    ):
+        _pending_src = f"_pending_{_pending_widget_key}"
+        if _pending_src in st.session_state:
+            st.session_state[_pending_widget_key] = (
+                st.session_state.pop(_pending_src)
+            )
+
     cc1, cc2 = st.columns(2)
     with cc1:
         st.text_area(
@@ -1450,7 +1469,12 @@ with tabs[5]:
             ),
             key="fig_fill_galanin_btn",
         ):
-            st.session_state["widget_fig_primary_highlights"] = (
+            # NB: write to _pending_* (not the widget key directly) —
+            # the widget was already instantiated above, so a direct
+            # assignment would raise StreamlitAPIException. The drain
+            # block at the top of render_figures_tab moves this into
+            # ``widget_fig_primary_highlights`` on the next rerun.
+            st.session_state["_pending_widget_fig_primary_highlights"] = (
                 ", ".join(GALANIN_GENES)
             )
             st.rerun()
@@ -1580,11 +1604,18 @@ with tabs[5]:
                     if _fetched:
                         # Join on newlines so the user can see and
                         # edit the list comfortably in the text area.
+                        # NB: write to _pending_* (not the widget keys
+                        # directly) — the text_area and checkbox were
+                        # already instantiated above in this run, so a
+                        # direct assignment would raise
+                        # StreamlitAPIException. The drain block at
+                        # the top of render_figures_tab moves these
+                        # into the real widget keys on the next rerun.
                         st.session_state[
-                            "widget_fig_volcano_filter_text"
+                            "_pending_widget_fig_volcano_filter_text"
                         ] = "\n".join(sorted(_fetched))
                         st.session_state[
-                            "widget_fig_volcano_filter_enabled"
+                            "_pending_widget_fig_volcano_filter_enabled"
                         ] = True
                         st.success(
                             f"Fetched {len(_fetched)} gene symbol(s) "
