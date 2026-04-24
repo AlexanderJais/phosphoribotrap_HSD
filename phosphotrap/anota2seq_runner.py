@@ -133,6 +133,8 @@ ads <- anota2seqSelSigGenes(
   maxPAdj             = spec$maxPAdj,
   minSlopeTranslation = spec$minSlopeTranslation,
   maxSlopeTranslation = spec$maxSlopeTranslation,
+  minSlopeBuffering   = spec$minSlopeBuffering,
+  maxSlopeBuffering   = spec$maxSlopeBuffering,
   selContrast         = 1
 )
 
@@ -259,6 +261,8 @@ def _build_spec(
         "maxPAdj": cfg.anota_max_padj,
         "minSlopeTranslation": cfg.anota_min_slope_trans,
         "maxSlopeTranslation": cfg.anota_max_slope_trans,
+        "minSlopeBuffering": cfg.anota_min_slope_buff,
+        "maxSlopeBuffering": cfg.anota_max_slope_buff,
     }
 
 

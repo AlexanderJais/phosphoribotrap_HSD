@@ -66,6 +66,8 @@ REQUIRED_KEYS = (
     "widget_anota_max_padj",
     "widget_anota_min_slope_trans",
     "widget_anota_max_slope_trans",
+    "widget_anota_min_slope_buff",
+    "widget_anota_max_slope_buff",
     "widget_min_fpkm",
     # Reference tab — fixed in 120f50c (MEDIUM #8).
     "ref_release",

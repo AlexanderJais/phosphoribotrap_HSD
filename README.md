@@ -192,14 +192,25 @@ with a generated R script that imports salmon's `quant.sf` via
 anota2seqAnalyze(..., useRVM = TRUE)
 anota2seqSelSigGenes(
   ...,
-  selDeltaPT          = 0.1,   # was 0.2 — chronic-stimulus relaxed
-  selDeltaTP          = 0.1,   # was 0.2 — chronic-stimulus relaxed
-  maxPAdj             = 0.1,   # was 0.05
-  minSlopeTranslation = 0,     # was 0.5
-  maxSlopeTranslation = 2,     # was 1.5
+  selDeltaPT          = 0.1,   # looser than paper default log2(1.2) ≈ 0.263
+  selDeltaTP          = 0.1,   # looser than paper default log2(1.2) ≈ 0.263
+  maxPAdj             = 0.15,  # anota2seq package default (Oertlin 2019)
+  minSlopeTranslation = -1,    # anota2seq package default
+  maxSlopeTranslation = 2,     # anota2seq package default
+  minSlopeBuffering   = -2,    # anota2seq package default
+  maxSlopeBuffering   = 1,     # anota2seq package default
   selContrast         = 1
 )
 ```
+
+These are the defaults baked into `anota2seqRun()` by the package
+authors (see `anota2seqRun.R` on GitHub). Earlier versions of this app
+shipped stricter thresholds (`maxPAdj = 0.1`, `minSlopeTranslation = 0`,
+no buffering-slope bounds) that filtered out genes the published paper
+would have retained. We still keep `selDeltaPT` / `selDeltaTP` at 0.1
+— looser than the paper's `log2(1.2)` — because at n=3 per group the
+effect-size distribution is dominated by noise and small-effect
+sensitivity matters more than effect-size thresholding.
 
 It partitions genes into the three anota2seq regulatory modes per
 contrast (retrieved via ``anota2seqGetOutput(ads, output="regModes",
