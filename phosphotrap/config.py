@@ -207,21 +207,19 @@ def reconcile_contrasts(current: list[str], available: list[str]) -> list[str]:
         return []
     return [c for c in current if c in available]
 
-# anota2seq thresholds. These match the package's own built-in
-# recommendations from anota2seqRun.R (Oertlin et al. 2019, NAR) — the
-# authors publish these as the sensible default for a chronic / mild
-# stimulus study. Previous values were stricter than the paper (maxPAdj
-# 0.10 vs. 0.15; minSlopeTranslation 0 vs. -1; no buffering-slope bounds),
-# which filtered out genes the paper would have retained. We keep the
-# effect-size deltas at 0.1 (looser than the paper's log2(1.2) ≈ 0.263)
-# because n=3 here makes small-effect sensitivity the priority.
+# anota2seq filtering thresholds. The p-value and slope bounds mirror
+# the package defaults published in ``anota2seqRun.R`` (Oertlin et al.
+# 2019, NAR). ``selDeltaPT`` / ``selDeltaTP`` are deliberately looser
+# than the package's ``log2(1.2) ≈ 0.263`` — at n=3 per group we accept
+# smaller effect sizes for discovery and rely on orthogonal validation
+# for confidence.
 DEFAULT_DELTA_PT = 0.1
 DEFAULT_DELTA_TP = 0.1
-DEFAULT_MAX_PADJ = 0.15          # anota2seq package default
-DEFAULT_MIN_SLOPE_TRANS = -1.0   # anota2seq package default
-DEFAULT_MAX_SLOPE_TRANS = 2.0    # anota2seq package default
-DEFAULT_MIN_SLOPE_BUFF = -2.0    # anota2seq package default
-DEFAULT_MAX_SLOPE_BUFF = 1.0     # anota2seq package default
+DEFAULT_MAX_PADJ = 0.15
+DEFAULT_MIN_SLOPE_TRANS = -1.0
+DEFAULT_MAX_SLOPE_TRANS = 2.0
+DEFAULT_MIN_SLOPE_BUFF = -2.0
+DEFAULT_MAX_SLOPE_BUFF = 1.0
 
 # FPKM floor for IP/Input ratios.
 DEFAULT_MIN_FPKM = 0.1

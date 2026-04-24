@@ -84,11 +84,11 @@ from phosphotrap.samples import (
     to_records,
 )
 
-# Chronic-stimulus threshold preset — the "apply preset" button resets
-# to the anota2seq package's own built-in defaults (Oertlin et al. 2019,
-# NAR, published in anota2seqRun.R). We keep selDeltaPT / selDeltaTP at
-# 0.1 (looser than the paper's log2(1.2) ≈ 0.263) because n=3 here makes
-# small-effect sensitivity the priority; the rest match the paper.
+# Values written by the "Apply chronic-stimulus preset" button. The
+# p-value and slope entries are the anota2seq package defaults from
+# anota2seqRun.R (Oertlin et al. 2019, NAR); the deltaPT/TP entries are
+# looser than the paper's log2(1.2) ≈ 0.263 to prioritise small-effect
+# sensitivity at n=3 per group.
 CHRONIC_PRESET = {
     "anota_delta_pt": 0.1,
     "anota_delta_tp": 0.1,

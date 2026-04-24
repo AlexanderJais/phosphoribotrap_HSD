@@ -192,25 +192,23 @@ with a generated R script that imports salmon's `quant.sf` via
 anota2seqAnalyze(..., useRVM = TRUE)
 anota2seqSelSigGenes(
   ...,
-  selDeltaPT          = 0.1,   # looser than paper default log2(1.2) ≈ 0.263
-  selDeltaTP          = 0.1,   # looser than paper default log2(1.2) ≈ 0.263
-  maxPAdj             = 0.15,  # anota2seq package default (Oertlin 2019)
-  minSlopeTranslation = -1,    # anota2seq package default
-  maxSlopeTranslation = 2,     # anota2seq package default
-  minSlopeBuffering   = -2,    # anota2seq package default
-  maxSlopeBuffering   = 1,     # anota2seq package default
+  selDeltaPT          = 0.1,   # looser than package default log2(1.2)
+  selDeltaTP          = 0.1,   # looser than package default log2(1.2)
+  maxPAdj             = 0.15,  # package default
+  minSlopeTranslation = -1,    # package default
+  maxSlopeTranslation = 2,     # package default
+  minSlopeBuffering   = -2,    # package default
+  maxSlopeBuffering   = 1,     # package default
   selContrast         = 1
 )
 ```
 
-These are the defaults baked into `anota2seqRun()` by the package
-authors (see `anota2seqRun.R` on GitHub). Earlier versions of this app
-shipped stricter thresholds (`maxPAdj = 0.1`, `minSlopeTranslation = 0`,
-no buffering-slope bounds) that filtered out genes the published paper
-would have retained. We still keep `selDeltaPT` / `selDeltaTP` at 0.1
-— looser than the paper's `log2(1.2)` — because at n=3 per group the
-effect-size distribution is dominated by noise and small-effect
-sensitivity matters more than effect-size thresholding.
+The p-value and slope bounds are the defaults baked into
+`anota2seqRun()` by the package authors (Oertlin et al. 2019, NAR; see
+`anota2seqRun.R`). `selDeltaPT` / `selDeltaTP` are set below the
+package's `log2(1.2) ≈ 0.263` because at n = 3 per group we accept
+smaller effect sizes for discovery and rely on orthogonal validation
+for confidence.
 
 It partitions genes into the three anota2seq regulatory modes per
 contrast (retrieved via ``anota2seqGetOutput(ads, output="regModes",
@@ -222,7 +220,7 @@ analysis=...)``):
   the spec called "mRNA+translation")
 
 All thresholds are adjustable in the Config tab; the **Apply chronic-
-stimulus preset** button resets them to the loose defaults above.
+stimulus preset** button resets them to the values above.
 
 **Graceful degradation.** If `Rscript`, `r-base`,
 `bioconductor-anota2seq`, or `bioconductor-tximport` aren't installed,
@@ -267,15 +265,16 @@ graceful-degradation pattern as anota2seq.
 
 ## Small-n design note
 
-3 vs 3 is small. We know. The chronic-stimulus thresholds are
-deliberately loose because we expect mild, consistent effects and we're
-optimising for sensitivity at the cost of specificity. The between-
-group Mann-Whitney p-values can only take a few discrete values on a
-3-vs-3 comparison, so rank-order them alongside the anota2seq calls
-rather than treating them as independent tests. Independent validation
-(qPCR, biological replication, orthogonal assay) is the path to
-publication confidence — no amount of statistical gymnastics will
-substitute for that at n = 3 per group.
+3 vs 3 is small. We know. The chronic-stimulus preset follows the
+anota2seq package's own published defaults on the p-value and slope
+filters, trading some specificity for sensitivity to the mild,
+consistent effects expected here. Between-group Mann-Whitney p-values
+can only take a few discrete values on a 3-vs-3 comparison, so
+rank-order them alongside the anota2seq calls rather than treating
+them as independent tests. Independent validation (qPCR, biological
+replication, orthogonal assay) is the path to publication confidence
+— no amount of statistical gymnastics will substitute for that at
+n = 3 per group.
 
 ## Repository layout
 
