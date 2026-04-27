@@ -207,12 +207,19 @@ def reconcile_contrasts(current: list[str], available: list[str]) -> list[str]:
         return []
     return [c for c in current if c in available]
 
-# anota2seq thresholds for a chronic stimulus — deliberately loose.
+# anota2seq filtering thresholds. The p-value and slope bounds mirror
+# the package defaults published in ``anota2seqRun.R`` (Oertlin et al.
+# 2019, NAR). ``selDeltaPT`` / ``selDeltaTP`` are deliberately looser
+# than the package's ``log2(1.2) ≈ 0.263`` — at n=3 per group we accept
+# smaller effect sizes for discovery and rely on orthogonal validation
+# for confidence.
 DEFAULT_DELTA_PT = 0.1
 DEFAULT_DELTA_TP = 0.1
-DEFAULT_MAX_PADJ = 0.1
-DEFAULT_MIN_SLOPE_TRANS = 0.0
+DEFAULT_MAX_PADJ = 0.15
+DEFAULT_MIN_SLOPE_TRANS = -1.0
 DEFAULT_MAX_SLOPE_TRANS = 2.0
+DEFAULT_MIN_SLOPE_BUFF = -2.0
+DEFAULT_MAX_SLOPE_BUFF = 1.0
 
 # FPKM floor for IP/Input ratios.
 DEFAULT_MIN_FPKM = 0.1
@@ -244,6 +251,8 @@ class AppConfig:
     anota_max_padj: float = DEFAULT_MAX_PADJ
     anota_min_slope_trans: float = DEFAULT_MIN_SLOPE_TRANS
     anota_max_slope_trans: float = DEFAULT_MAX_SLOPE_TRANS
+    anota_min_slope_buff: float = DEFAULT_MIN_SLOPE_BUFF
+    anota_max_slope_buff: float = DEFAULT_MAX_SLOPE_BUFF
 
     # Sign-consistency / Mann-Whitney defaults
     min_fpkm: float = DEFAULT_MIN_FPKM

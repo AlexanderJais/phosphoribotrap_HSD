@@ -84,14 +84,19 @@ from phosphotrap.samples import (
     to_records,
 )
 
-# Chronic-stimulus threshold preset — relaxed defaults for the app's
-# "apply preset" button (3-vs-3, mild effect sizes).
+# Values written by the "Apply chronic-stimulus preset" button. The
+# p-value and slope entries are the anota2seq package defaults from
+# anota2seqRun.R (Oertlin et al. 2019, NAR); the deltaPT/TP entries are
+# looser than the paper's log2(1.2) ≈ 0.263 to prioritise small-effect
+# sensitivity at n=3 per group.
 CHRONIC_PRESET = {
     "anota_delta_pt": 0.1,
     "anota_delta_tp": 0.1,
-    "anota_max_padj": 0.1,
-    "anota_min_slope_trans": 0.0,
+    "anota_max_padj": 0.15,
+    "anota_min_slope_trans": -1.0,
     "anota_max_slope_trans": 2.0,
+    "anota_min_slope_buff": -2.0,
+    "anota_max_slope_buff": 1.0,
 }
 
 logger = get_logger()
@@ -495,8 +500,9 @@ with tabs[0]:
         )
     with d2:
         st.caption(
-            "Chronic-stimulus preset: loose thresholds (deltaPT/TP=0.1, "
-            "maxPAdj=0.1, slopeTrans 0–2) for mild effect sizes and n=3."
+            "Chronic-stimulus preset: anota2seq package defaults "
+            "(maxPAdj=0.15, slopeTrans -1–2, slopeBuff -2–1; Oertlin "
+            "et al. 2019) with deltaPT/TP=0.1 for n=3 sensitivity."
         )
         if st.button("Apply chronic-stimulus preset"):
             # Write directly to widget session state so the next render
@@ -523,12 +529,14 @@ with tabs[0]:
         ("anota_max_padj", cfg.anota_max_padj),
         ("anota_min_slope_trans", cfg.anota_min_slope_trans),
         ("anota_max_slope_trans", cfg.anota_max_slope_trans),
+        ("anota_min_slope_buff", cfg.anota_min_slope_buff),
+        ("anota_max_slope_buff", cfg.anota_max_slope_buff),
         ("min_fpkm", cfg.min_fpkm),
     ):
         st.session_state.setdefault(f"widget_{_k}", float(_default))
 
     st.subheader("anota2seq thresholds")
-    t1, t2, t3 = st.columns(3)
+    t1, t2, t3, t4 = st.columns(4)
     with t1:
         st.number_input("selDeltaPT", key="widget_anota_delta_pt", step=0.05, format="%.2f")
         st.number_input("selDeltaTP", key="widget_anota_delta_tp", step=0.05, format="%.2f")
@@ -538,6 +546,9 @@ with tabs[0]:
     with t3:
         st.number_input("minSlopeTranslation", key="widget_anota_min_slope_trans", step=0.1, format="%.2f")
         st.number_input("maxSlopeTranslation", key="widget_anota_max_slope_trans", step=0.1, format="%.2f")
+    with t4:
+        st.number_input("minSlopeBuffering", key="widget_anota_min_slope_buff", step=0.1, format="%.2f")
+        st.number_input("maxSlopeBuffering", key="widget_anota_max_slope_buff", step=0.1, format="%.2f")
 
     # Copy widget state back into cfg so save/diff see the live values.
     for _wkey, _attr in _PATH_KEYS.items():
@@ -552,6 +563,8 @@ with tabs[0]:
     cfg.anota_max_padj        = float(st.session_state["widget_anota_max_padj"])
     cfg.anota_min_slope_trans = float(st.session_state["widget_anota_min_slope_trans"])
     cfg.anota_max_slope_trans = float(st.session_state["widget_anota_max_slope_trans"])
+    cfg.anota_min_slope_buff  = float(st.session_state["widget_anota_min_slope_buff"])
+    cfg.anota_max_slope_buff  = float(st.session_state["widget_anota_max_slope_buff"])
     cfg.min_fpkm              = float(st.session_state["widget_min_fpkm"])
 
     # Inline validation of the paths that downstream steps actually
