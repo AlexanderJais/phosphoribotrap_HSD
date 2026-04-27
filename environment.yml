@@ -20,3 +20,9 @@ dependencies:
   - bioconductor-tximport
   - bioconductor-anota2seq>=1.22
   - bioconductor-deseq2
+  # DESeq2 small-n recovery: IHW (Ignatiadis 2016, Nat Methods) for
+  # baseMean-weighted padj, apeglm (Zhu 2018) for LFC shrinkage with
+  # s-values. Both are optional — the DESeq2 runner falls back
+  # gracefully when either is missing.
+  - bioconductor-ihw
+  - bioconductor-apeglm

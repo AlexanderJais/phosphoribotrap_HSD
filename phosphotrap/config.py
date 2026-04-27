@@ -224,6 +224,20 @@ DEFAULT_MAX_SLOPE_BUFF = 1.0
 # FPKM floor for IP/Input ratios.
 DEFAULT_MIN_FPKM = 0.1
 
+# DESeq2 small-n recovery defaults.
+#   min_count_filter — drop genes with rowSums(counts) below this before
+#     calling DESeq(); standard DESeq2 vignette practice. 0 disables.
+#   use_ihw         — IHW p-value weighting (Ignatiadis et al. 2016) on
+#     the Wald p-values, weighted by ``baseMean``. Adds a ``padj_ihw``
+#     column. Falls back gracefully when the IHW package is missing.
+#   use_apeglm      — apeglm LFC shrinkage with s-values (Zhu et al.
+#     2018 / Stephens 2017). Adds ``log2FoldChange_apeglm``,
+#     ``lfcSE_apeglm``, and ``svalue`` columns. Falls back gracefully
+#     when the apeglm package is missing.
+DEFAULT_DESEQ2_MIN_COUNT_FILTER = 10
+DEFAULT_DESEQ2_USE_IHW = True
+DEFAULT_DESEQ2_USE_APEGLM = True
+
 
 @dataclass
 class AppConfig:
@@ -257,6 +271,11 @@ class AppConfig:
     # Sign-consistency / Mann-Whitney defaults
     min_fpkm: float = DEFAULT_MIN_FPKM
     sign_consistency_min: int = 3
+
+    # DESeq2 small-n recovery toggles
+    deseq2_min_count_filter: int = DEFAULT_DESEQ2_MIN_COUNT_FILTER
+    deseq2_use_ihw: bool = DEFAULT_DESEQ2_USE_IHW
+    deseq2_use_apeglm: bool = DEFAULT_DESEQ2_USE_APEGLM
 
     # ------------------------------------------------------------------
     # Persistence

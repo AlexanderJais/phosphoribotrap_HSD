@@ -69,6 +69,12 @@ REQUIRED_KEYS = (
     "widget_anota_min_slope_buff",
     "widget_anota_max_slope_buff",
     "widget_min_fpkm",
+    # DESeq2 small-n recovery toggles. Same explicit-key rationale —
+    # the runner reads these from cfg, so they must round-trip through
+    # widget state on every Config-tab render.
+    "widget_deseq2_min_count_filter",
+    "widget_deseq2_use_ihw",
+    "widget_deseq2_use_apeglm",
     # Reference tab — fixed in 120f50c (MEDIUM #8).
     "ref_release",
     "ref_dest",

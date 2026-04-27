@@ -550,6 +550,37 @@ with tabs[0]:
         st.number_input("minSlopeBuffering", key="widget_anota_min_slope_buff", step=0.1, format="%.2f")
         st.number_input("maxSlopeBuffering", key="widget_anota_max_slope_buff", step=0.1, format="%.2f")
 
+    # ------------------------------------------------------------------
+    # DESeq2 small-n recovery toggles. Counterpart of the anota2seq
+    # block above for the optional DESeq2 cross-check.
+    # ------------------------------------------------------------------
+    st.session_state.setdefault(
+        "widget_deseq2_min_count_filter", int(cfg.deseq2_min_count_filter)
+    )
+    st.session_state.setdefault("widget_deseq2_use_ihw", bool(cfg.deseq2_use_ihw))
+    st.session_state.setdefault("widget_deseq2_use_apeglm", bool(cfg.deseq2_use_apeglm))
+
+    st.subheader("DESeq2 small-n recovery")
+    st.caption(
+        "Optional small-n boosters layered on top of the DESeq2 "
+        "interaction cross-check. Pre-filter trims low-count genes "
+        "before BH (vignette default = 10). IHW weights p-values by "
+        "baseMean (Ignatiadis 2016) → adds padj_ihw. apeglm shrinks "
+        "LFC and reports s-values (Zhu 2018 / Stephens 2017) → adds "
+        "log2FoldChange_apeglm + svalue."
+    )
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        st.number_input(
+            "Pre-filter rowSums(counts) ≥",
+            key="widget_deseq2_min_count_filter",
+            min_value=0, step=1, format="%d",
+        )
+    with d2:
+        st.checkbox("IHW p-value weighting", key="widget_deseq2_use_ihw")
+    with d3:
+        st.checkbox("apeglm LFC shrinkage", key="widget_deseq2_use_apeglm")
+
     # Copy widget state back into cfg so save/diff see the live values.
     for _wkey, _attr in _PATH_KEYS.items():
         setattr(cfg, _attr, st.session_state[_wkey])
@@ -566,6 +597,9 @@ with tabs[0]:
     cfg.anota_min_slope_buff  = float(st.session_state["widget_anota_min_slope_buff"])
     cfg.anota_max_slope_buff  = float(st.session_state["widget_anota_max_slope_buff"])
     cfg.min_fpkm              = float(st.session_state["widget_min_fpkm"])
+    cfg.deseq2_min_count_filter = int(st.session_state["widget_deseq2_min_count_filter"])
+    cfg.deseq2_use_ihw        = bool(st.session_state["widget_deseq2_use_ihw"])
+    cfg.deseq2_use_apeglm     = bool(st.session_state["widget_deseq2_use_apeglm"])
 
     # Inline validation of the paths that downstream steps actually
     # touch. Catches:

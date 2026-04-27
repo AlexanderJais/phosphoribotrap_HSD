@@ -263,6 +263,30 @@ validation. This is explicitly **not** the primary analysis — it's for
 "does this also show up in a model a reviewer will recognise?". Same
 graceful-degradation pattern as anota2seq.
 
+**Small-n recovery** (Config tab). Three optional steps layered on top
+of the canonical Wald + BH output, all defaulting to *on* because the
+3-vs-3 design otherwise floods the BH penalty with low-power genes:
+
+1. **Pre-filter low-count genes** before `DESeq()` —
+   `rowSums(counts) ≥ 10` is the DESeq2 vignette recommendation.
+   Cuts the multiple-testing universe roughly in half. Set the
+   threshold to 0 to disable.
+2. **IHW p-value weighting** (Ignatiadis et al. 2016, *Nat Methods*) —
+   `results(dds, filterFun = ihw)` weights each gene's p-value by
+   `baseMean`, recovering ~30–50 % more discoveries at the same
+   nominal FDR. Adds a `padj_ihw` column alongside the canonical
+   `padj`.
+3. **apeglm LFC shrinkage with s-values** (Zhu et al. 2018; Stephens
+   2017) — `lfcShrink(..., type = "apeglm", svalue = TRUE)` returns
+   shrunk effect sizes and an `svalue` column. `svalue < 0.005`
+   controls aggregate false-sign rate and is operationally more
+   permissive than BH-padj for small effects.
+
+Each step is independent and falls back gracefully when its R
+dependency (`IHW` / `apeglm`, both in `environment.yml`) is missing.
+The output `interaction.tsv` is a superset of the classic columns —
+existing downstream consumers keep working unchanged.
+
 ## Small-n design note
 
 3 vs 3 is small. We know. The chronic-stimulus preset follows the

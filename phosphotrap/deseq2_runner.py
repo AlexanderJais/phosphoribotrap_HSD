@@ -41,6 +41,15 @@ suppressMessages({
   library(DESeq2)
 })
 
+# Optional small-n recovery dependencies. We probe + library() inside
+# requireNamespace so a missing package degrades to "feature off" instead
+# of aborting the whole DESeq2 cross-check. Bound to flags consumed
+# below alongside the corresponding spec toggles.
+has_ihw <- requireNamespace("IHW", quietly = TRUE)
+if (has_ihw) suppressMessages(library(IHW))
+has_apeglm <- requireNamespace("apeglm", quietly = TRUE)
+if (has_apeglm) suppressMessages(library(apeglm))
+
 args <- commandArgs(trailingOnly = TRUE)
 spec_path <- args[1]
 out_dir   <- args[2]
@@ -85,6 +94,18 @@ rownames(coldata) <- coldata$sample
 
 dds <- DESeqDataSetFromTximport(txi, colData = coldata,
                                 design = ~ group + fraction + group:fraction)
+
+# Pre-filter low-count genes — DESeq2 vignette recommendation. Reduces
+# the multiple-testing universe so BH-padj is not dominated by
+# thousands of near-zero genes that have no power anyway. spec$min_count_filter
+# == 0 disables the filter.
+if (spec$min_count_filter > 0) {
+  keep <- rowSums(counts(dds)) >= spec$min_count_filter
+  cat(sprintf("Pre-filter: %d / %d genes retained (rowSums >= %d)\n",
+              sum(keep), nrow(dds), spec$min_count_filter))
+  dds <- dds[keep, ]
+}
+
 dds <- DESeq(dds)
 
 interaction_name <- paste0("group", spec$alt_group, ".fractionIP")
@@ -95,8 +116,53 @@ if (!(interaction_name %in% res_names)) {
   quit(status = 2)
 }
 
+# Wald test with default BH FDR — kept as the canonical ``pvalue`` /
+# ``padj`` columns so downstream consumers (figures.py volcano filters,
+# the Analysis tab table) keep working without any column renames.
 res <- results(dds, name = interaction_name)
 out <- as.data.frame(res)
+
+# IHW-weighted padj (Ignatiadis et al. 2016, Nat Methods). Re-runs
+# ``results()`` with ``filterFun = ihw`` and keeps the new padj as a
+# separate column so it's an *additional* signal rather than a silent
+# replacement. ``baseMean`` is used implicitly as the IHW covariate.
+if (has_ihw && isTRUE(spec$use_ihw)) {
+  res_ihw <- tryCatch(
+    results(dds, name = interaction_name, filterFun = ihw),
+    error = function(e) {
+      cat("WARNING: IHW results() failed, skipping padj_ihw column: ",
+          conditionMessage(e), "\n", sep = "")
+      NULL
+    }
+  )
+  if (!is.null(res_ihw)) {
+    out$padj_ihw <- as.data.frame(res_ihw)$padj
+  }
+}
+
+# apeglm shrinkage (Zhu et al. 2018) with s-values (Stephens 2017).
+# Adds shrunk LFC, posterior SD, and svalue columns. svalue < 0.005
+# controls aggregate false-sign rate and is operationally more
+# permissive than BH-padj for small effects at small n.
+if (has_apeglm && isTRUE(spec$use_apeglm)) {
+  res_apeglm <- tryCatch(
+    lfcShrink(dds, coef = interaction_name, type = "apeglm",
+              svalue = TRUE, quiet = TRUE),
+    error = function(e) {
+      cat("WARNING: lfcShrink(apeglm) failed, skipping shrunk columns: ",
+          conditionMessage(e), "\n", sep = "")
+      NULL
+    }
+  )
+  if (!is.null(res_apeglm)) {
+    apeglm_df <- as.data.frame(res_apeglm)
+    out$log2FoldChange_apeglm <- apeglm_df$log2FoldChange
+    out$lfcSE_apeglm <- apeglm_df$lfcSE
+    if ("svalue" %in% colnames(apeglm_df)) {
+      out$svalue <- apeglm_df$svalue
+    }
+  }
+}
 gene_ids <- rownames(out)
 out$gene_id <- gene_ids
 # Insert gene_name right after gene_id so the TSV is readable at a
@@ -165,6 +231,7 @@ def _build_spec(
     tx2gene: Path,
     alt_group: str,
     ref_group: str,
+    cfg: AppConfig,
 ) -> dict:
     # Flatten 6 pairs into 12 libraries in deterministic order.
     subset: list[SampleRecord] = []
@@ -184,8 +251,10 @@ def _build_spec(
         #   v1: original interaction.tsv with only gene_id.
         #   v2: interaction.tsv with gene_id + gene_name.
         #   v3: adds the .done sentinel marker and tx2gene_mtime
-        #       content-drift guard (see below).
-        "_schema_version": 3,
+        #       content-drift guard.
+        #   v4: adds small-n recovery columns (padj_ihw, apeglm-shrunk
+        #       LFC + svalue) gated by the new spec toggles below.
+        "_schema_version": 4,
         "tx2gene": str(tx2gene),
         # Content-drift guard: captures in-place reference rebuilds
         # that leave the path unchanged but replace the gene_id ->
@@ -200,6 +269,12 @@ def _build_spec(
         "names": [r.name() for r in subset],
         "group": [r.group for r in subset],
         "fraction": [r.fraction for r in subset],
+        # Small-n recovery toggles. Including them in the spec means
+        # toggling any of them in the Config tab invalidates the cache
+        # automatically (cache-hit gate is byte-equal spec match).
+        "min_count_filter": int(cfg.deseq2_min_count_filter),
+        "use_ihw": bool(cfg.deseq2_use_ihw),
+        "use_apeglm": bool(cfg.deseq2_use_apeglm),
     }
 
 
@@ -238,7 +313,8 @@ def run_deseq2_interaction(
     # was "output file exists" — which silently returned stale
     # results after the user changed samples or the salmon root.
     fresh_spec = _build_spec(
-        contrast_pairs, Path(salmon_root), Path(tx2gene), alt_group, ref_group,
+        contrast_pairs, Path(salmon_root), Path(tx2gene),
+        alt_group, ref_group, cfg,
     )
     fresh_spec_text = _serialise_spec(fresh_spec)
     cached_spec_path = scratch / _SPEC_FILENAME

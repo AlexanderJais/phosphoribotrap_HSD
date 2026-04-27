@@ -243,7 +243,7 @@ def test_deseq2_cache_hit_when_spec_matches(tmp_path: Path):
 
     contrast_pairs = records_for_contrast(records, alt_group="HSD1", ref_group="NCD")
     matching_spec = deseq2_runner._build_spec(
-        contrast_pairs, salmon_root, tx2gene, "HSD1", "NCD",
+        contrast_pairs, salmon_root, tx2gene, "HSD1", "NCD", cfg,
     )
     (scratch / "spec.json").write_text(
         deseq2_runner._serialise_spec(matching_spec)
@@ -301,10 +301,12 @@ def test_deseq2_cache_miss_when_sample_list_changes(tmp_path: Path):
 
     from phosphotrap.samples import records_for_contrast
 
+    cfg = AppConfig()
+
     # Write the spec for records_a
     pairs_a = records_for_contrast(records_a, alt_group="HSD1", ref_group="NCD")
     old_spec = deseq2_runner._build_spec(
-        pairs_a, salmon_root, tx2gene, "HSD1", "NCD",
+        pairs_a, salmon_root, tx2gene, "HSD1", "NCD", cfg,
     )
     (scratch / "spec.json").write_text(
         deseq2_runner._serialise_spec(old_spec)
@@ -321,7 +323,6 @@ def test_deseq2_cache_miss_when_sample_list_changes(tmp_path: Path):
         (scratch / deseq2_runner._DONE_MARKER).write_text("test\n")
         return _fake_proc(returncode=0, stdout="ok\n")
 
-    cfg = AppConfig()
     with patch.object(subprocess, "run", side_effect=fake_run) as mock_run:
         res = deseq2_runner.run_deseq2_interaction(
             records_b,       # <-- different records
