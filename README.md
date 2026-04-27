@@ -283,9 +283,23 @@ of the canonical Wald + BH output, all defaulting to *on* because the
    permissive than BH-padj for small effects.
 
 Each step is independent and falls back gracefully when its R
-dependency (`IHW` / `apeglm`, both in `environment.yml`) is missing.
-The output `interaction.tsv` is a superset of the classic columns —
-existing downstream consumers keep working unchanged.
+dependency (`IHW` / `apeglm`) is missing. `apeglm` ships in
+`environment.yml`; `IHW` does **not**, because its dependency
+`bioconductor-lpsymphony` has no `osx-arm64` build (Apple Silicon).
+On platforms where it works, install it after the env is created:
+
+```
+conda install -n phosphotrap -c bioconda bioconductor-ihw
+# or, from inside R on any platform:
+# if (!require("BiocManager")) install.packages("BiocManager")
+# BiocManager::install("IHW")
+```
+
+When IHW isn't installed, the runner just omits the `padj_ihw` column
+from `interaction.tsv` — pre-filter and apeglm shrinkage still apply
+(those are the bigger wins). The output is a superset of the classic
+DESeq2 columns either way, so existing downstream consumers keep
+working unchanged.
 
 ## Small-n design note
 

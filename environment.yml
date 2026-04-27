@@ -20,9 +20,18 @@ dependencies:
   - bioconductor-tximport
   - bioconductor-anota2seq>=1.22
   - bioconductor-deseq2
-  # DESeq2 small-n recovery: IHW (Ignatiadis 2016, Nat Methods) for
-  # baseMean-weighted padj, apeglm (Zhu 2018) for LFC shrinkage with
-  # s-values. Both are optional — the DESeq2 runner falls back
-  # gracefully when either is missing.
-  - bioconductor-ihw
+  # apeglm (Zhu 2018) for LFC shrinkage with s-values — required for
+  # the DESeq2 small-n recovery mode. Available on all bioconda
+  # platforms (linux-64, osx-64, osx-arm64).
   - bioconductor-apeglm
+  # IHW (Ignatiadis 2016, Nat Methods) for baseMean-weighted padj is
+  # *not* listed here because its dependency ``bioconductor-lpsymphony``
+  # has no osx-arm64 build (Apple Silicon). The DESeq2 runner already
+  # falls back gracefully when IHW is missing — only the ``padj_ihw``
+  # column is dropped from the output. To install IHW manually on
+  # platforms where it works (linux-64 / osx-64 with conda, or any
+  # platform via BiocManager from R):
+  #   conda install -n phosphotrap -c bioconda bioconductor-ihw
+  # or, from inside R:
+  #   if (!require("BiocManager")) install.packages("BiocManager")
+  #   BiocManager::install("IHW")
