@@ -189,8 +189,8 @@ with a generated R script that imports salmon's `quant.sf` via
 (INPUT) matrices, and runs:
 
 ```
-anota2seqAnalyze(..., useRVM = TRUE)
-anota2seqSelSigGenes(
+anota2seqAnalyze(...)   # always computes both regular + RVM stats
+anota2seqSelSigGenes(   # selects on RVM-derived p-values by default
   ...,
   selDeltaPT          = 0.1,   # looser than package default log2(1.2)
   selDeltaTP          = 0.1,   # looser than package default log2(1.2)

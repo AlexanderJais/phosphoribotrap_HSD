@@ -122,7 +122,6 @@ ads <- anota2seqDataSetFromMatrix(
 
 ads <- anota2seqAnalyze(
   ads,
-  useRVM   = TRUE,
   analysis = c("translation", "buffering", "translated mRNA", "total mRNA")
 )
 
