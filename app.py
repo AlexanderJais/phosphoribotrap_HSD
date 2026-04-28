@@ -1425,9 +1425,24 @@ with tabs[4]:
     # and just above the result tables) so users see filter state at
     # the same scroll-depth as the data it shapes.
     if cfg.target_filter_enabled and cfg.target_filter_text.strip():
+        # ``resolve_symbols`` needs a {symbol_lower: gene_id} map, NOT
+        # the inverse {gene_id: gene_name} map (``_id_to_name``). Build
+        # it here from the same cached helper the Figures tab uses, so
+        # tx2gene reparses don't happen on every rerun.
+        try:
+            _stat = Path(cfg.tx2gene_tsv).stat() if cfg.tx2gene_tsv else None
+            _target_symbol_map = (
+                _cached_symbol_map(
+                    cfg.tx2gene_tsv, _stat.st_mtime, _stat.st_size
+                )
+                if _stat is not None else {}
+            )
+        except (FileNotFoundError, OSError):
+            _target_symbol_map = {}
+
         _t_symbols = parse_highlight_text(cfg.target_filter_text)
         _t_resolved, _target_missing = resolve_symbols(
-            _t_symbols, _id_to_name
+            _t_symbols, _target_symbol_map
         )
         target_base_ids = {
             _strip_ensembl_version(gid) for gid in _t_resolved.keys()
