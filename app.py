@@ -51,6 +51,7 @@ from phosphotrap.figures import (
     volcano_plot,
 )
 from phosphotrap.fpkm import (
+    bh_recompute_subset,
     between_group_contrast,
     load_salmon_matrix,
     pair_ratios,
@@ -340,6 +341,22 @@ tabs = st.tabs(
 with tabs[0]:
     st.header("Configuration")
 
+    # Drain any ``_pending_<widget_key>`` slots populated by a button
+    # handler in the previous run. Streamlit forbids writing to a
+    # widget key after the widget rendered, so buttons that want to
+    # set a text_area / checkbox value below instead stash it in
+    # ``_pending_*`` and call ``st.rerun()``. This block fires BEFORE
+    # the widgets are built, so the transfer is legal.
+    for _pending_widget_key in (
+        "widget_target_filter_text",
+        "widget_target_filter_enabled",
+    ):
+        _pending_src = f"_pending_{_pending_widget_key}"
+        if _pending_src in st.session_state:
+            st.session_state[_pending_widget_key] = (
+                st.session_state.pop(_pending_src)
+            )
+
     # The unsaved-changes indicator is rendered at the *end* of this
     # tab, after every widget has written its live value back into
     # cfg. Rendering it at the top would show state from the previous
@@ -581,6 +598,107 @@ with tabs[0]:
     with d3:
         st.checkbox("apeglm LFC shrinkage", key="widget_deseq2_use_apeglm")
 
+    # ------------------------------------------------------------------
+    # Targeted analysis filter — restricts the multiple-testing universe
+    # of every Analysis-tab table (Mann-Whitney, anota2seq regmodes,
+    # DESeq2 interaction) to a pre-specified gene set declared a priori.
+    # When enabled, BH-FDR is recomputed within the subset and stored
+    # as ``padj_subset`` (the original BH-padj is preserved as ``padj``).
+    # See README "Targeted analysis filter" section for the methods-
+    # statement template.
+    # ------------------------------------------------------------------
+    st.session_state.setdefault(
+        "widget_target_filter_enabled", bool(cfg.target_filter_enabled)
+    )
+    st.session_state.setdefault(
+        "widget_target_filter_text", str(cfg.target_filter_text)
+    )
+    st.session_state.setdefault(
+        "widget_target_filter_go_id", str(cfg.target_filter_go_id)
+    )
+    st.session_state.setdefault(
+        "widget_target_filter_go_taxon", str(cfg.target_filter_go_taxon)
+    )
+
+    st.subheader("Targeted analysis filter (a-priori gene set)")
+    st.caption(
+        "Restrict the multiple-testing universe of every analysis "
+        "table to a pre-registered gene set (typically a GO term that "
+        "matches the experiment's biological hypothesis — e.g. "
+        "GO:0007218 'neuropeptide signaling pathway' for a phosphoTRAP "
+        "study targeting neuronal-marker discovery). BH-FDR is "
+        "recomputed within the subset; the original padj is preserved "
+        "as ``padj_full``. Reviewer-defensible only when declared a "
+        "priori in the methods — see README for the methods statement."
+    )
+    st.checkbox(
+        "Enable targeted-filter mode",
+        key="widget_target_filter_enabled",
+    )
+    tf1, tf2 = st.columns([3, 2])
+    with tf1:
+        st.text_area(
+            "Gene set (symbols, comma / whitespace / newline separated)",
+            key="widget_target_filter_text",
+            height=140,
+            help=(
+                "Paste gene symbols directly, or use 'Fetch from GO "
+                "term' to populate from a GO annotation."
+            ),
+        )
+    with tf2:
+        st.text_input(
+            "GO term ID",
+            key="widget_target_filter_go_id",
+            help="Canonical GO curie, e.g. GO:0007218.",
+        )
+        st.text_input(
+            "NCBI taxon ID",
+            key="widget_target_filter_go_taxon",
+            help="10090 = mouse, 10116 = rat, 9606 = human.",
+        )
+        if st.button(
+            "Fetch gene list from GO term",
+            key="cfg_target_fetch_go_btn",
+        ):
+            _go_id = st.session_state["widget_target_filter_go_id"].strip()
+            _go_taxon = (
+                st.session_state["widget_target_filter_go_taxon"].strip()
+            )
+            _go_cache_dir = cfg.effective_report_dir() / "go_cache"
+            try:
+                with st.spinner(
+                    f"Fetching {_go_id} (taxon {_go_taxon}) from QuickGO…"
+                ):
+                    _fetched = fetch_go_term_genes(
+                        _go_id,
+                        taxon=_go_taxon,
+                        cache_dir=_go_cache_dir,
+                        force_refresh=True,
+                    )
+                if _fetched:
+                    # Defer widget writes via _pending_* — the text_area
+                    # and checkbox already rendered this run; direct
+                    # assignment would raise StreamlitAPIException.
+                    st.session_state[
+                        "_pending_widget_target_filter_text"
+                    ] = "\n".join(sorted(_fetched))
+                    st.session_state[
+                        "_pending_widget_target_filter_enabled"
+                    ] = True
+                    st.success(
+                        f"Fetched {len(_fetched)} gene symbol(s) for "
+                        f"{_go_id} and enabled the targeted filter."
+                    )
+                    st.rerun()
+                else:
+                    st.warning(
+                        f"QuickGO returned no gene symbols for "
+                        f"{_go_id} (taxon {_go_taxon})."
+                    )
+            except (ValueError, RuntimeError) as _exc:
+                st.error(str(_exc))
+
     # Copy widget state back into cfg so save/diff see the live values.
     for _wkey, _attr in _PATH_KEYS.items():
         setattr(cfg, _attr, st.session_state[_wkey])
@@ -600,6 +718,10 @@ with tabs[0]:
     cfg.deseq2_min_count_filter = int(st.session_state["widget_deseq2_min_count_filter"])
     cfg.deseq2_use_ihw        = bool(st.session_state["widget_deseq2_use_ihw"])
     cfg.deseq2_use_apeglm     = bool(st.session_state["widget_deseq2_use_apeglm"])
+    cfg.target_filter_enabled = bool(st.session_state["widget_target_filter_enabled"])
+    cfg.target_filter_text    = str(st.session_state["widget_target_filter_text"])
+    cfg.target_filter_go_id   = str(st.session_state["widget_target_filter_go_id"])
+    cfg.target_filter_go_taxon = str(st.session_state["widget_target_filter_go_taxon"])
 
     # Inline validation of the paths that downstream steps actually
     # touch. Catches:
@@ -1190,6 +1312,58 @@ with tabs[3]:
 # ======================================================================
 # ANALYSIS TAB
 # ======================================================================
+
+
+def _strip_ensembl_version(gid: str) -> str:
+    """Strip the trailing ``.N`` version suffix from an Ensembl gene_id.
+
+    Salmon / tximport sometimes preserve the version (``ENSMUSG...8``)
+    and sometimes strip it depending on the tx2gene file. Targeted-
+    filter set membership has to be tolerant either way, so every
+    comparison goes through this helper. Non-Ensembl symbols
+    (gene_name fallbacks, MGI IDs without dots) pass through unchanged.
+    """
+    if not isinstance(gid, str):
+        return ""
+    return gid.split(".", 1)[0]
+
+
+def _targeted_filter_apply(
+    df: pd.DataFrame,
+    target_base_ids: set[str],
+    p_padj_pairs: tuple[tuple[str, str], ...],
+) -> pd.DataFrame:
+    """Subset ``df`` to rows whose ``gene_id`` (version-stripped) is in
+    ``target_base_ids``, then recompute BH-FDR within the subset for
+    each ``(p_col, padj_col)`` pair, writing the result to
+    ``f"{padj_col}_subset"``.
+
+    The original ``padj_col`` columns are preserved so reviewers can
+    compare full-universe BH against subset BH side-by-side. Returns
+    a fresh DataFrame; ``df`` is not mutated.
+
+    A ``df`` without a ``gene_id`` column or with ``target_base_ids``
+    empty is returned untouched so callers don't have to gate every
+    invocation.
+    """
+    if df is None or df.empty or "gene_id" not in df.columns:
+        return df if df is not None else pd.DataFrame()
+    if not target_base_ids:
+        return df
+    base = df["gene_id"].astype(str).map(_strip_ensembl_version)
+    mask = base.isin(target_base_ids).to_numpy()
+    out = df.loc[mask].copy().reset_index(drop=True)
+    if out.empty:
+        return out
+    full_mask = np.ones(len(out), dtype=bool)
+    for p_col, padj_col in p_padj_pairs:
+        if p_col in out.columns:
+            out[f"{padj_col}_subset"] = bh_recompute_subset(
+                out, p_col, full_mask
+            )
+    return out
+
+
 with tabs[4]:
     st.header("Analysis — per contrast")
 
@@ -1204,6 +1378,10 @@ with tabs[4]:
         help="anota2seq, sign-consistency, and Mann-Whitney are all run per contrast.",
     )
     alt_group, ref_group = contrast.split("_vs_")
+
+    # Targeted-analysis gene set is resolved later, just after
+    # ``_id_to_name`` is loaded — see below.
+    target_base_ids: set[str] = set()
 
     if st.button("Load salmon quant outputs"):
         try:
@@ -1240,6 +1418,49 @@ with tabs[4]:
     # the tx2gene path is unset, missing, or 2-column — download
     # buttons still work, they just can't add gene_name.
     _id_to_name = _load_id_to_name_or_empty(cfg.tx2gene_tsv)
+
+    # Resolve the targeted-analysis gene set once per render — used by
+    # every per-contrast result table below. Empty set means "filter is
+    # off". Banner is rendered here (just below the contrast selector
+    # and just above the result tables) so users see filter state at
+    # the same scroll-depth as the data it shapes.
+    if cfg.target_filter_enabled and cfg.target_filter_text.strip():
+        _t_symbols = parse_highlight_text(cfg.target_filter_text)
+        _t_resolved, _target_missing = resolve_symbols(
+            _t_symbols, _id_to_name
+        )
+        target_base_ids = {
+            _strip_ensembl_version(gid) for gid in _t_resolved.keys()
+        }
+        if target_base_ids:
+            _label = (
+                f"{cfg.target_filter_go_id} (taxon "
+                f"{cfg.target_filter_go_taxon})"
+                if cfg.target_filter_go_id else "custom set"
+            )
+            st.info(
+                f"**Targeted-filter mode active.** Restricting analysis "
+                f"tables to **{len(_t_resolved)} pre-registered genes** "
+                f"({_label}). BH-FDR is recomputed within the subset "
+                f"and written to ``*_subset`` columns; the original "
+                f"full-universe padj is preserved."
+            )
+            if _target_missing:
+                _shown = ", ".join(_target_missing[:15])
+                _extra = (
+                    f" (+{len(_target_missing) - 15} more)"
+                    if len(_target_missing) > 15 else ""
+                )
+                st.caption(
+                    f"Symbols not found in tx2gene "
+                    f"({len(_target_missing)}): {_shown}{_extra}"
+                )
+        else:
+            st.warning(
+                "Targeted-filter mode is enabled but the gene list is "
+                "empty or unresolved. Either disable the filter on the "
+                "Config tab or paste / GO-fetch a gene list."
+            )
     if not _id_to_name and cfg.tx2gene_tsv:
         # Escalated from st.caption -> st.error: users kept missing
         # the grey footnote and complaining that downloads contained
@@ -1368,9 +1589,22 @@ with tabs[4]:
     cr = panel.get("contrast_result")
     if cr is not None and not cr.table.empty:
         st.subheader(f"Between-group Mann-Whitney — {contrast}")
-        st.dataframe(cr.table.head(200), use_container_width=True)
-        # Full MW table with gene_name injected as the second column.
-        _mw_export = prepend_gene_name(cr.table, _id_to_name)
+        # Apply the targeted-analysis filter (recomputes BH-FDR within
+        # the gene-set subset; full-universe ``mannwhitney_padj`` is
+        # preserved for reviewers wanting both views). When the filter
+        # is off, ``target_base_ids`` is empty and this is a no-op.
+        _mw_table = _targeted_filter_apply(
+            cr.table,
+            target_base_ids,
+            (("mannwhitney_p", "mannwhitney_padj"),),
+        )
+        if target_base_ids and _mw_table.shape[0] != cr.table.shape[0]:
+            st.caption(
+                f"Showing {_mw_table.shape[0]} of {cr.table.shape[0]} "
+                f"genes (targeted filter)."
+            )
+        st.dataframe(_mw_table.head(200), use_container_width=True)
+        _mw_export = prepend_gene_name(_mw_table, _id_to_name)
         st.download_button(
             f"Download full table ({contrast})",
             data=_df_to_tsv(_mw_export),
@@ -1482,32 +1716,47 @@ with tabs[4]:
                 return df if df is not None else pd.DataFrame()
             return prepend_gene_name(df, _id_to_name, id_col="gene_id")
 
+        # anota2seq's RVM-corrected p-value column is ``apvRvmP``; its
+        # full-universe BH adjustment is ``apvRvmPAdj``. The targeted
+        # filter recomputes BH on the subset and writes the result to
+        # ``apvRvmPAdj_subset`` per regmode table.
+        _anota_pp_pairs = (("apvRvmP", "apvRvmPAdj"),)
+        _t_translation = _targeted_filter_apply(
+            anota.translation, target_base_ids, _anota_pp_pairs
+        )
+        _t_buffering = _targeted_filter_apply(
+            anota.buffering, target_base_ids, _anota_pp_pairs
+        )
+        _t_mrna = _targeted_filter_apply(
+            anota.mrna_abundance, target_base_ids, _anota_pp_pairs
+        )
+
         with st.expander("translation (IP changes, INPUT does not)", expanded=False):
-            st.dataframe(anota.translation, use_container_width=True)
-            if not anota.translation.empty:
+            st.dataframe(_t_translation, use_container_width=True)
+            if not _t_translation.empty:
                 st.download_button(
                     f"Download translation ({contrast})",
-                    data=_df_to_tsv(_augmented_anota(anota.translation)),
+                    data=_df_to_tsv(_augmented_anota(_t_translation)),
                     file_name=f"anota2seq_translation_{contrast}.tsv",
                     mime="text/tab-separated-values",
                     key=f"anota_translation_dl_{contrast}",
                 )
         with st.expander("buffering (INPUT changes, IP compensates)", expanded=False):
-            st.dataframe(anota.buffering, use_container_width=True)
-            if not anota.buffering.empty:
+            st.dataframe(_t_buffering, use_container_width=True)
+            if not _t_buffering.empty:
                 st.download_button(
                     f"Download buffering ({contrast})",
-                    data=_df_to_tsv(_augmented_anota(anota.buffering)),
+                    data=_df_to_tsv(_augmented_anota(_t_buffering)),
                     file_name=f"anota2seq_buffering_{contrast}.tsv",
                     mime="text/tab-separated-values",
                     key=f"anota_buffering_dl_{contrast}",
                 )
         with st.expander("mRNA abundance (both change coherently)", expanded=False):
-            st.dataframe(anota.mrna_abundance, use_container_width=True)
-            if not anota.mrna_abundance.empty:
+            st.dataframe(_t_mrna, use_container_width=True)
+            if not _t_mrna.empty:
                 st.download_button(
                     f"Download mRNA abundance ({contrast})",
-                    data=_df_to_tsv(_augmented_anota(anota.mrna_abundance)),
+                    data=_df_to_tsv(_augmented_anota(_t_mrna)),
                     file_name=f"anota2seq_mrna_abundance_{contrast}.tsv",
                     mime="text/tab-separated-values",
                     key=f"anota_mrna_dl_{contrast}",
@@ -1516,16 +1765,34 @@ with tabs[4]:
     deseq = panel.get("deseq2")
     if deseq is not None and deseq.ok:
         st.subheader(f"DESeq2 interaction cross-check — {contrast}")
-        st.dataframe(deseq.table.head(200), use_container_width=True)
+        # DESeq2 carries the canonical Wald ``pvalue`` / ``padj`` plus
+        # the optional small-n recovery columns ``padj_ihw`` (also
+        # derived from ``pvalue``). The targeted filter recomputes BH
+        # on the subset for both, writing ``padj_subset`` and
+        # ``padj_ihw_subset`` columns when the corresponding source
+        # column is present.
+        _deseq_pp_pairs = (
+            ("pvalue", "padj"),
+            ("pvalue", "padj_ihw"),
+        )
+        _deseq_table = _targeted_filter_apply(
+            deseq.table, target_base_ids, _deseq_pp_pairs
+        )
+        if target_base_ids and _deseq_table.shape[0] != deseq.table.shape[0]:
+            st.caption(
+                f"Showing {_deseq_table.shape[0]} of "
+                f"{deseq.table.shape[0]} genes (targeted filter)."
+            )
+        st.dataframe(_deseq_table.head(200), use_container_width=True)
         # DESeq2 table already carries ``gene_id`` as its first column
         # (see deseq2_runner.py RSCRIPT_TEMPLATE). Insert gene_name
         # right after it for readable downloads.
-        if "gene_id" in deseq.table.columns:
+        if "gene_id" in _deseq_table.columns:
             _deseq_export = prepend_gene_name(
-                deseq.table, _id_to_name, id_col="gene_id"
+                _deseq_table, _id_to_name, id_col="gene_id"
             )
         else:
-            _deseq_export = deseq.table
+            _deseq_export = _deseq_table
         st.download_button(
             f"Download DESeq2 interaction ({contrast})",
             data=_df_to_tsv(_deseq_export),

@@ -238,6 +238,20 @@ DEFAULT_DESEQ2_MIN_COUNT_FILTER = 10
 DEFAULT_DESEQ2_USE_IHW = True
 DEFAULT_DESEQ2_USE_APEGLM = True
 
+# Targeted analysis filter — restricts the multiple-testing universe
+# of every analysis-tab table to a pre-specified gene set declared a
+# priori (typically a GO term that matches the experiment's biological
+# question; e.g. GO:0007218 "neuropeptide signaling pathway" for a
+# phosphoTRAP study targeting neuronal-marker discovery). When
+# enabled, each table's BH-FDR padj is recomputed on the subset; the
+# original padj is preserved as ``padj_full``. This is reviewer-
+# defensible only when the gene set is pre-registered — declare it
+# explicitly in the methods.
+DEFAULT_TARGET_FILTER_ENABLED = False
+DEFAULT_TARGET_FILTER_TEXT = ""
+DEFAULT_TARGET_FILTER_GO_ID = "GO:0007218"
+DEFAULT_TARGET_FILTER_GO_TAXON = "10090"
+
 
 @dataclass
 class AppConfig:
@@ -276,6 +290,12 @@ class AppConfig:
     deseq2_min_count_filter: int = DEFAULT_DESEQ2_MIN_COUNT_FILTER
     deseq2_use_ihw: bool = DEFAULT_DESEQ2_USE_IHW
     deseq2_use_apeglm: bool = DEFAULT_DESEQ2_USE_APEGLM
+
+    # Targeted analysis filter (a-priori gene set + BH on subset)
+    target_filter_enabled: bool = DEFAULT_TARGET_FILTER_ENABLED
+    target_filter_text: str = DEFAULT_TARGET_FILTER_TEXT
+    target_filter_go_id: str = DEFAULT_TARGET_FILTER_GO_ID
+    target_filter_go_taxon: str = DEFAULT_TARGET_FILTER_GO_TAXON
 
     # ------------------------------------------------------------------
     # Persistence

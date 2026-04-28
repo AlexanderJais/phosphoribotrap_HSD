@@ -75,6 +75,14 @@ REQUIRED_KEYS = (
     "widget_deseq2_min_count_filter",
     "widget_deseq2_use_ihw",
     "widget_deseq2_use_apeglm",
+    # Targeted-analysis filter (a-priori gene set with subset BH-FDR).
+    # The "Fetch from GO term" button writes to the _pending_<key>
+    # slots, which the drain block at the top of the Config tab moves
+    # into these real keys, so they MUST stay explicit.
+    "widget_target_filter_enabled",
+    "widget_target_filter_text",
+    "widget_target_filter_go_id",
+    "widget_target_filter_go_taxon",
     # Reference tab — fixed in 120f50c (MEDIUM #8).
     "ref_release",
     "ref_dest",

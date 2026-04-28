@@ -299,6 +299,32 @@ def between_group_contrast(
     )
 
 
+def bh_recompute_subset(
+    df: pd.DataFrame, p_col: str, mask: np.ndarray
+) -> np.ndarray:
+    """Return BH-FDR computed only over rows where ``mask`` is True.
+
+    Out-of-mask rows get ``NaN`` (they were not part of the targeted
+    analysis universe and don't have a meaningful subset-padj). Used by
+    the Analysis tab when ``cfg.target_filter_enabled`` is set: the
+    multiple-testing universe is restricted a-priori to the gene set
+    declared in the Config tab (typically a GO term, e.g. GO:0007218
+    neuropeptide signaling) and the canonical BH-padj is replaced
+    with one that reflects the smaller test universe.
+
+    Returns a numpy array of the same length as ``df``. Callers
+    typically assign this to ``df["padj_subset"]`` so the original
+    ``padj`` (computed against the full ~30k-gene universe) is
+    preserved alongside.
+    """
+    out = np.full(len(df), np.nan)
+    if not mask.any() or p_col not in df.columns:
+        return out
+    p_subset = pd.to_numeric(df.loc[mask, p_col], errors="coerce").to_numpy()
+    out[np.where(mask)[0]] = _bh_fdr(p_subset)
+    return out
+
+
 def _bh_fdr(pvals: np.ndarray) -> np.ndarray:
     """Benjamini-Hochberg FDR. Defers to scipy when available."""
     p = np.asarray(pvals, dtype=float)
