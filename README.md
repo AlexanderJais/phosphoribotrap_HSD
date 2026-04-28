@@ -301,6 +301,52 @@ from `interaction.tsv` — pre-filter and apeglm shrinkage still apply
 DESeq2 columns either way, so existing downstream consumers keep
 working unchanged.
 
+## Targeted analysis filter (a-priori gene set)
+
+The single biggest small-n recovery is *not* a clever statistic — it's
+restricting the multiple-testing universe to a pre-specified gene set
+that matches the experiment's biological question. At ~120 genes vs
+~30 k, the BH penalty drops roughly 250× and effects that were buried
+under genome-wide FDR become defensible.
+
+This is **only reviewer-defensible when the gene set is pre-registered**
+— i.e. declared in the methods *before* looking at the data, not
+chosen post-hoc to rescue specific genes. The phosphoTRAP design here
+qualifies: the IP pulls down sucrose-activated neurons, and the
+biological hypothesis is "which neuropeptides mark these neurons?",
+making the GO:0007218 (neuropeptide signaling pathway) gene set an
+a-priori candidate list.
+
+**Enabling it** — Config tab → *Targeted analysis filter*:
+
+1. Tick **Enable targeted-filter mode**.
+2. Either paste gene symbols directly into the gene-set text area, or
+   enter a GO term + taxon and click **Fetch gene list from GO term**
+   (queries the EBI QuickGO API, caches under `<report_dir>/go_cache/`).
+3. Save config and re-run the Analysis tab.
+
+**What it does to the output tables** (Mann-Whitney, anota2seq
+regulatory modes, DESeq2 interaction):
+
+- Rows are filtered to genes in the pre-registered set. The full table
+  is still cached on disk; only the *displayed* and *downloaded* tables
+  are filtered.
+- BH-FDR is recomputed within the subset and written to a
+  `*_subset` column (e.g. `padj_subset`, `mannwhitney_padj_subset`,
+  `apvRvmPAdj_subset`, `padj_ihw_subset`). The original full-universe
+  padj is preserved alongside.
+- A banner at the top of the Analysis tab states the filter is active
+  and shows the gene-set size, plus any unresolved symbols.
+
+**Methods-statement template** (paraphrase for your manuscript):
+
+> Multiple testing was applied within an a-priori gene set
+> (GO:0007218, neuropeptide signaling pathway, *N*=*x* genes mapped to
+> our reference build) to reflect the pre-registered biological focus
+> of the phosphoTRAP design. Both genome-wide and gene-set–restricted
+> Benjamini–Hochberg FDR are reported (columns `padj` and
+> `padj_subset` respectively).
+
 ## Small-n design note
 
 3 vs 3 is small. We know. The chronic-stimulus preset follows the
